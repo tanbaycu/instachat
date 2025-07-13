@@ -1,0 +1,87 @@
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Chrome/Selenium
+chromium_temp_data_dir/
+chrome_temp_*/
+selenium_temp_*/
+
+# Logs
+*.log
+logs/
+log/
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.temp
+
+# Memory backups (có thể chứa thông tin nhạy cảm)
+temp_memories_backup/
+memories_backup/
+
+# API keys và credentials (backup)
+*_api_key*
+*_credentials*
+*_secret*
+*_token*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Images generated
+generated_images/
+temp_images/ 
