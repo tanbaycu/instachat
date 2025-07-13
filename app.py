@@ -841,7 +841,7 @@ if __name__ == "__main__":
         if not gemini_api_key:
             notify_error("⚠️ GEMINI_API_KEY không được tìm thấy!", "main")
             notify_info("💡 Hướng dẫn setup:", "main")
-            notify_info("   1. Tạo file .env từ .env.example", "main")
+            notify_info("   1. Tạo file .env từ env_example", "main")
             notify_info("   2. Hoặc set environment: set GEMINI_API_KEY=your_key", "main")
             notify_info("   3. Hoặc cấu hình trong config_manager.py", "main")
             raise Exception("Missing GEMINI_API_KEY")
@@ -865,7 +865,7 @@ if __name__ == "__main__":
         if not username or not password or not target_username:
             notify_error("⚠️ Thiếu thông tin đăng nhập Instagram!", "main")
             notify_info("💡 Hướng dẫn setup:", "main")
-            notify_info("   1. Tạo file .env từ .env.example", "main")
+            notify_info("   1. Tạo file .env từ env_example", "main")
             notify_info("   2. Hoặc set environment variables:", "main")
             notify_info("      set INSTAGRAM_USERNAME=your_username", "main")
             notify_info("      set INSTAGRAM_PASSWORD=your_password", "main")

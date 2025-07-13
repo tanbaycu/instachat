@@ -1,6 +1,13 @@
 # 🤖 InstaChat - Bot Instagram AI Thông Minh Tự Động
 
+[![GitHub Stars](https://img.shields.io/github/stars/tanbaycu/instachat?style=social)](https://github.com/tanbaycu/instachat)
+[![GitHub Forks](https://img.shields.io/github/forks/tanbaycu/instachat?style=social)](https://github.com/tanbaycu/instachat)
+[![GitHub Issues](https://img.shields.io/github/issues/tanbaycu/instachat)](https://github.com/tanbaycu/instachat/issues)
+[![GitHub License](https://img.shields.io/github/license/tanbaycu/instachat)](https://github.com/tanbaycu/instachat)
+
 Bot chat Instagram thông minh sử dụng Google Gemini AI với hệ thống monitoring, bảo mật, và phân tích nâng cao. Được thiết kế để hoạt động 24/7 với khả năng tự động phục hồi, quản lý bộ nhớ, và tạo hình ảnh AI.
+
+> 🔗 **Repository:** [https://github.com/tanbaycu/instachat](https://github.com/tanbaycu/instachat)
 
 ## 🌟 Tính năng nổi bật
 
@@ -72,7 +79,7 @@ instachat/
 
 ### 1. Clone repository
 ```bash
-git clone <repository-url>
+git clone https://github.com/tanbaycu/instachat.git
 cd instachat
 ```
 
@@ -90,8 +97,8 @@ pip install -r requirements.txt
 
 **Cách 1: Sử dụng file .env (Khuyến nghị)**
 ```bash
-# Copy file .env.example thành .env
-cp .env.example .env
+# Copy file env_example thành .env
+cp env_example .env
 
 # Chỉnh sửa file .env với thông tin thực tế
 GEMINI_API_KEY=your_gemini_api_key_here
@@ -425,7 +432,7 @@ def health_check():
 ### Credential Management
 ```bash
 # Sử dụng file .env (Khuyến nghị)
-cp .env.example .env
+cp env_example .env
 # Chỉnh sửa file .env với thông tin thực tế
 
 # Hoặc sử dụng environment variables
@@ -551,7 +558,7 @@ flow = insights.analyze_conversation_flow(messages)
 ### Development Setup
 ```bash
 # Clone repo
-git clone <repo-url>
+git clone https://github.com/tanbaycu/instachat.git
 cd instachat
 
 # Tạo virtual environment
@@ -633,7 +640,7 @@ A: Bot sử dụng các kỹ thuật anti-detection nhưng vẫn có rủi ro.
 *"Tự động hóa thông minh, kết nối con người"* 🤖✨
 
 ### Star History
-⭐ Nếu project này hữu ích, hãy cho chúng tôi một star trên GitHub!
+⭐ Nếu project này hữu ích, hãy cho chúng tôi một star trên [GitHub](https://github.com/tanbaycu/instachat)!
 
 ### Contributors
 **Tác giả chính:** [tanbaycu](https://linktr.ee/tanbaycu) - *Creator & Lead Developer*

@@ -120,7 +120,7 @@ def check_api_key():
     if not api_key:
         print("❌ GEMINI_API_KEY not found in environment")
         print("💡 Solutions:")
-        print("   1. Create .env file from .env.example")
+        print("   1. Create .env file from env_example")
         print("   2. Set environment: set GEMINI_API_KEY=your_key")
         print("   3. Get API key from: https://makersuite.google.com/app/apikey")
         return False
@@ -151,7 +151,7 @@ def check_instagram_credentials():
     if missing:
         print(f"❌ Missing credentials: {', '.join(missing)}")
         print("💡 Solutions:")
-        print("   1. Create .env file from .env.example")
+        print("   1. Create .env file from env_example")
         print("   2. Set environment variables:")
         for var in missing:
             print(f"      set {var}=your_value")
