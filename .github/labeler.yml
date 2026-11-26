@@ -1,22 +1,27 @@
-frontend:
+ai-core:
   - changed-files:
-      - any-glob-to-any-file: ["src/**/*.{ts,tsx,css,scss,html}", "public/**/*"]
+      - any-glob-to-any-file: ["core.py", "image_generator.py", "llm_memories_manager.py", "memory/**/*"]
 
-backend:
+automation:
   - changed-files:
-      - any-glob-to-any-file: ["server/**/*"]
+      - any-glob-to-any-file: ["app.py", "start_bot.py", "automation/**/*"]
+
+security:
+  - changed-files:
+      - any-glob-to-any-file: ["security/**/*", "SECURITY.md"]
+
+dashboard:
+  - changed-files:
+      - any-glob-to-any-file: ["dashboard/**/*"]
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file: ["tests/**/*"]
 
 documentation:
   - changed-files:
-      - any-glob-to-any-file: ["**/*.md"]
+      - any-glob-to-any-file: ["**/*.md", "LICENSE"]
 
-configuration:
+ci-cd:
   - changed-files:
-      - any-glob-to-any-file:
-          [
-            ".github/**/*",
-            "package.json",
-            "tsconfig.json",
-            "vite.config.ts",
-            "tailwind.config.js",
-          ]
+      - any-glob-to-any-file: [".github/**/*", "Dockerfile", "docker-compose.yml", "pyproject.toml"]

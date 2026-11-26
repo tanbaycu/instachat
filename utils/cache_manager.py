@@ -1,475 +1,446 @@
+from collections import OrderedDict
+from datetime import datetime
+import hashlib
 import json
 import os
-import time
-import hashlib
-import pickle
-from datetime import datetime, timedelta
-from collections import OrderedDict
+import tempfile
 import threading
+import time
+from typing import Any, Dict, List, Optional
+
+from config.config_manager import get_data_dir
 
 
 class CacheManager:
-    def __init__(self, cache_dir="utils/cache", max_memory_items=1000, max_file_size_mb=100):
-        self.cache_dir = cache_dir
+    """LRU cache kết hợp lưu đĩa bằng JSON an toàn (loại bỏ hoàn toàn pickle)."""
+
+    def __init__(
+        self,
+        cache_dir: Optional[str] = None,
+        max_memory_items: int = 1000,
+        max_file_size_mb: int = 100,
+        persist_threshold_bytes: int = 512,
+    ):
+        self.cache_dir = cache_dir or get_data_dir("cache")
         self.max_memory_items = max_memory_items
         self.max_file_size_mb = max_file_size_mb
-        
-        # Memory cache (LRU)
-        self.memory_cache = OrderedDict()
-        self.cache_stats = {
-            'hits': 0,
-            'misses': 0,
-            'memory_items': 0,
-            'disk_items': 0,
-            'total_size_mb': 0
-        }
-        
-        # Thread safety
-        self.lock = threading.RLock()
-        
-        # Tạo thư mục cache
-        os.makedirs(cache_dir, exist_ok=True)
-        
-        # Load existing cache stats
-        self.load_cache_stats()
-        
-        print("[CACHE] 💾 Cache Manager đã khởi tạo")
+        self.persist_threshold_bytes = persist_threshold_bytes
 
-    def generate_cache_key(self, data):
-        """Tạo cache key từ data"""
+        self.memory_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+        self.cache_stats: Dict[str, Any] = {
+            "hits": 0,
+            "misses": 0,
+            "memory_items": 0,
+            "disk_items": 0,
+            "total_size_mb": 0.0,
+        }
+        self.lock = threading.RLock()
+
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.load_cache_stats()
+
+    def generate_cache_key(self, data: Any) -> str:
         if isinstance(data, dict):
-            # Sắp xếp dict để key consistent
-            sorted_data = json.dumps(data, sort_keys=True)
+            sorted_data = json.dumps(data, sort_keys=True, ensure_ascii=False)
         else:
             sorted_data = str(data)
-        
-        return hashlib.md5(sorted_data.encode('utf-8')).hexdigest()
+        return hashlib.sha256(sorted_data.encode("utf-8")).hexdigest()[:32]
 
-    def get(self, key, default=None):
-        """Lấy item từ cache"""
+    def get(self, key: str, default: Any = None) -> Any:
         with self.lock:
-            # Kiểm tra memory cache trước
             if key in self.memory_cache:
-                # Move to end (LRU)
-                value = self.memory_cache.pop(key)
-                self.memory_cache[key] = value
-                self.cache_stats['hits'] += 1
-                
-                # Kiểm tra expiry
-                if self.is_expired(value):
-                    del self.memory_cache[key]
-                    self.cache_stats['misses'] += 1
+                item = self.memory_cache.pop(key)
+                if self.is_expired(item):
+                    self.cache_stats["memory_items"] = len(self.memory_cache)
+                    self.cache_stats["misses"] += 1
                     return default
-                
-                return value['data']
-            
-            # Kiểm tra disk cache
-            disk_value = self.get_from_disk(key)
-            if disk_value is not None:
-                # Load vào memory cache
-                self.set_memory_cache(key, disk_value)
-                self.cache_stats['hits'] += 1
-                return disk_value
-            
-            self.cache_stats['misses'] += 1
+                item["access_count"] = item.get("access_count", 0) + 1
+                self.memory_cache[key] = item
+                self.cache_stats["hits"] += 1
+                return item["data"]
+
+            disk_item = self._read_disk_item(key)
+            if disk_item is not None:
+                # Đưa đầy đủ metadata {data, timestamp, ttl, access_count} vào RAM để tránh KeyError 'ttl'.
+                self.set_memory_cache(key, disk_item)
+                self.cache_stats["hits"] += 1
+                return disk_item["data"]
+
+            self.cache_stats["misses"] += 1
             return default
 
-    def set(self, key, value, ttl_seconds=3600):
-        """Lưu item vào cache"""
+    def set(self, key: str, value: Any, ttl_seconds: int = 3600, persist: Optional[bool] = None) -> None:
         with self.lock:
-            cache_item = {
-                'data': value,
-                'timestamp': time.time(),
-                'ttl': ttl_seconds,
-                'access_count': 0
+            cache_item: Dict[str, Any] = {
+                "data": value,
+                "timestamp": time.time(),
+                "ttl": ttl_seconds,
+                "access_count": 0,
             }
-            
-            # Lưu vào memory cache
             self.set_memory_cache(key, cache_item)
-            
-            # Lưu vào disk nếu item quan trọng hoặc lớn
-            if self.should_persist_to_disk(value):
+
+            should_save = self.should_persist_to_disk(value) if persist is None else persist
+            if should_save:
                 self.set_disk_cache(key, cache_item)
 
-    def set_memory_cache(self, key, cache_item):
-        """Lưu vào memory cache với LRU eviction"""
-        # Xóa item cũ nếu tồn tại
+    def set_memory_cache(self, key: str, cache_item: Dict[str, Any]) -> None:
         if key in self.memory_cache:
             del self.memory_cache[key]
-        
-        # Thêm item mới
         self.memory_cache[key] = cache_item
-        
-        # LRU eviction
+
         while len(self.memory_cache) > self.max_memory_items:
             oldest_key = next(iter(self.memory_cache))
             del self.memory_cache[oldest_key]
-        
-        self.cache_stats['memory_items'] = len(self.memory_cache)
 
-    def should_persist_to_disk(self, value):
-        """Quyết định có nên lưu vào disk không"""
-        # Lưu vào disk nếu:
-        # 1. Dữ liệu lớn (>1KB)
-        # 2. Dữ liệu có thể tái sử dụng nhiều lần
-        
+        self.cache_stats["memory_items"] = len(self.memory_cache)
+
+    def should_persist_to_disk(self, value: Any) -> bool:
         try:
-            size = len(json.dumps(value)) if isinstance(value, (dict, list)) else len(str(value))
-            return size > 1024  # 1KB
-        except:
+            serialized = json.dumps(value, ensure_ascii=False)
+            return len(serialized.encode("utf-8")) > self.persist_threshold_bytes
+        except (TypeError, ValueError):
             return False
 
-    def set_disk_cache(self, key, cache_item):
-        """Lưu vào disk cache"""
-        try:
-            cache_file = os.path.join(self.cache_dir, f"{key}.cache")
-            
-            with open(cache_file, 'wb') as f:
-                pickle.dump(cache_item, f)
-            
-            self.cache_stats['disk_items'] += 1
-            self.update_cache_size()
-            
-        except Exception as e:
-            print(f"[CACHE] ⚠️ Lỗi lưu disk cache: {str(e)}")
+    def _disk_path(self, key: str) -> str:
+        safe_key = "".join(c for c in key if c.isalnum() or c in "-_")
+        return os.path.join(self.cache_dir, f"{safe_key}.json")
 
-    def get_from_disk(self, key):
-        """Lấy từ disk cache"""
+    def set_disk_cache(self, key: str, cache_item: Dict[str, Any]) -> None:
+        """Ghi nguyên tử (atomic write) ra file JSON để tránh hỏng file khi tắt đột ngột."""
+        cache_file = self._disk_path(key)
         try:
-            cache_file = os.path.join(self.cache_dir, f"{key}.cache")
-            
-            if not os.path.exists(cache_file):
+            os.makedirs(self.cache_dir, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(prefix=".cache_", suffix=".tmp", dir=self.cache_dir)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(cache_item, f, ensure_ascii=False)
+                os.replace(tmp_path, cache_file)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            self.update_cache_size()
+        except Exception as exc:
+            print(f"[CACHE] ⚠️ Lỗi lưu disk cache: {exc}")
+
+    def _read_disk_item(self, key: str) -> Optional[Dict[str, Any]]:
+        cache_file = self._disk_path(key)
+        if not os.path.exists(cache_file):
+            return None
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                cache_item = json.load(f)
+
+            if not isinstance(cache_item, dict) or "data" not in cache_item:
+                os.remove(cache_file)
                 return None
-            
-            with open(cache_file, 'rb') as f:
-                cache_item = pickle.load(f)
-            
-            # Kiểm tra expiry
+
+            cache_item.setdefault("timestamp", time.time())
+            cache_item.setdefault("ttl", 3600)
+            cache_item.setdefault("access_count", 0)
+
             if self.is_expired(cache_item):
                 os.remove(cache_file)
+                self.update_cache_size()
                 return None
-            
-            # Cập nhật access count
-            cache_item['access_count'] += 1
-            
-            return cache_item['data']
-            
-        except Exception as e:
-            print(f"[CACHE] ⚠️ Lỗi đọc disk cache: {str(e)}")
+
+            cache_item["access_count"] += 1
+            return cache_item
+        except Exception:
+            try:
+                os.remove(cache_file)
+            except OSError:
+                pass
             return None
 
-    def is_expired(self, cache_item):
-        """Kiểm tra item có hết hạn không"""
-        if cache_item['ttl'] <= 0:  # No expiry
-            return False
-        
-        return time.time() - cache_item['timestamp'] > cache_item['ttl']
+    def get_from_disk(self, key: str) -> Any:
+        item = self._read_disk_item(key)
+        return item["data"] if item is not None else None
 
-    def delete(self, key):
-        """Xóa item khỏi cache"""
+    def is_expired(self, cache_item: Dict[str, Any]) -> bool:
+        ttl = cache_item.get("ttl", 0)
+        if ttl <= 0:
+            return False
+        return (time.time() - cache_item.get("timestamp", 0)) > ttl
+
+    def delete(self, key: str) -> None:
         with self.lock:
-            # Xóa từ memory
-            if key in self.memory_cache:
-                del self.memory_cache[key]
-            
-            # Xóa từ disk
-            cache_file = os.path.join(self.cache_dir, f"{key}.cache")
+            self.memory_cache.pop(key, None)
+            cache_file = self._disk_path(key)
             if os.path.exists(cache_file):
                 os.remove(cache_file)
+            self.cache_stats["memory_items"] = len(self.memory_cache)
+            self.update_cache_size()
 
-    def clear(self):
-        """Xóa toàn bộ cache"""
+    def clear(self) -> None:
         with self.lock:
-            # Xóa memory cache
             self.memory_cache.clear()
-            
-            # Xóa disk cache
-            for filename in os.listdir(self.cache_dir):
-                if filename.endswith('.cache'):
-                    os.remove(os.path.join(self.cache_dir, filename))
-            
-            # Reset stats
+            if os.path.exists(self.cache_dir):
+                for filename in os.listdir(self.cache_dir):
+                    if filename.endswith(".json") and filename != "cache_stats.json":
+                        os.remove(os.path.join(self.cache_dir, filename))
             self.cache_stats = {
-                'hits': 0,
-                'misses': 0,
-                'memory_items': 0,
-                'disk_items': 0,
-                'total_size_mb': 0
+                "hits": 0,
+                "misses": 0,
+                "memory_items": 0,
+                "disk_items": 0,
+                "total_size_mb": 0.0,
             }
 
-    def cleanup_expired(self):
-        """Dọn dẹp items hết hạn"""
+    def cleanup_expired(self) -> None:
         with self.lock:
-            # Cleanup memory cache
-            expired_keys = []
-            for key, item in self.memory_cache.items():
-                if self.is_expired(item):
-                    expired_keys.append(key)
-            
+            expired_keys = [k for k, v in self.memory_cache.items() if self.is_expired(v)]
             for key in expired_keys:
                 del self.memory_cache[key]
-            
-            # Cleanup disk cache
-            disk_expired = 0
-            for filename in os.listdir(self.cache_dir):
-                if filename.endswith('.cache'):
-                    try:
-                        cache_file = os.path.join(self.cache_dir, filename)
-                        with open(cache_file, 'rb') as f:
-                            cache_item = pickle.load(f)
-                        
-                        if self.is_expired(cache_item):
-                            os.remove(cache_file)
-                            disk_expired += 1
-                    except:
-                        # Xóa file bị corrupt
-                        os.remove(cache_file)
-                        disk_expired += 1
-            
-            self.update_cache_size()
-            
-            print(f"[CACHE] 🧹 Cleaned up {len(expired_keys)} memory items, {disk_expired} disk items")
 
-    def update_cache_size(self):
-        """Cập nhật kích thước cache"""
+            if os.path.exists(self.cache_dir):
+                for filename in os.listdir(self.cache_dir):
+                    if not filename.endswith(".json") or filename == "cache_stats.json":
+                        continue
+                    cache_file = os.path.join(self.cache_dir, filename)
+                    try:
+                        with open(cache_file, "r", encoding="utf-8") as f:
+                            cache_item = json.load(f)
+                        if not isinstance(cache_item, dict) or self.is_expired(cache_item):
+                            os.remove(cache_file)
+                    except Exception:
+                        try:
+                            os.remove(cache_file)
+                        except OSError:
+                            pass
+
+            self.cache_stats["memory_items"] = len(self.memory_cache)
+            self.update_cache_size()
+
+    def update_cache_size(self) -> None:
         total_size = 0
         disk_items = 0
-        
-        for filename in os.listdir(self.cache_dir):
-            if filename.endswith('.cache'):
-                file_path = os.path.join(self.cache_dir, filename)
-                if os.path.exists(file_path):
-                    total_size += os.path.getsize(file_path)
-                    disk_items += 1
-        
-        self.cache_stats['total_size_mb'] = total_size / (1024 * 1024)
-        self.cache_stats['disk_items'] = disk_items
+        if os.path.exists(self.cache_dir):
+            for filename in os.listdir(self.cache_dir):
+                if filename.endswith(".json") and filename != "cache_stats.json":
+                    file_path = os.path.join(self.cache_dir, filename)
+                    if os.path.exists(file_path):
+                        total_size += os.path.getsize(file_path)
+                        disk_items += 1
+        self.cache_stats["total_size_mb"] = total_size / (1024 * 1024)
+        self.cache_stats["disk_items"] = disk_items
 
-    def get_cache_stats(self):
-        """Lấy thống kê cache"""
+    def get_cache_stats(self) -> Dict[str, Any]:
         with self.lock:
-            hit_rate = (self.cache_stats['hits'] / 
-                       max(1, self.cache_stats['hits'] + self.cache_stats['misses'])) * 100
-            
+            total = self.cache_stats["hits"] + self.cache_stats["misses"]
+            hit_rate = (self.cache_stats["hits"] / max(1, total)) * 100.0
             return {
                 **self.cache_stats,
-                'hit_rate_percent': hit_rate,
-                'memory_usage_percent': (len(self.memory_cache) / self.max_memory_items) * 100,
-                'disk_usage_percent': (self.cache_stats['total_size_mb'] / self.max_file_size_mb) * 100
+                "hit_rate_percent": hit_rate,
+                "memory_usage_percent": (len(self.memory_cache) / max(1, self.max_memory_items)) * 100.0,
+                "disk_usage_percent": (
+                    self.cache_stats["total_size_mb"] / max(1, self.max_file_size_mb)
+                ) * 100.0,
             }
 
-    def save_cache_stats(self):
-        """Lưu cache stats"""
+    def save_cache_stats(self) -> None:
         try:
-            stats_file = os.path.join(self.cache_dir, 'cache_stats.json')
-            with open(stats_file, 'w') as f:
+            stats_file = os.path.join(self.cache_dir, "cache_stats.json")
+            with open(stats_file, "w", encoding="utf-8") as f:
                 json.dump(self.cache_stats, f, indent=2)
-        except Exception as e:
-            print(f"[CACHE] ⚠️ Lỗi lưu cache stats: {str(e)}")
+        except Exception:
+            pass
 
-    def load_cache_stats(self):
-        """Load cache stats"""
+    def load_cache_stats(self) -> None:
         try:
-            stats_file = os.path.join(self.cache_dir, 'cache_stats.json')
+            stats_file = os.path.join(self.cache_dir, "cache_stats.json")
             if os.path.exists(stats_file):
-                with open(stats_file, 'r') as f:
-                    self.cache_stats.update(json.load(f))
-        except Exception as e:
-            print(f"[CACHE] ⚠️ Lỗi load cache stats: {str(e)}")
+                with open(stats_file, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    self.cache_stats.update(loaded)
+        except Exception:
+            pass
 
-    def print_cache_summary(self):
-        """In tóm tắt cache"""
+    def print_cache_summary(self) -> None:
         stats = self.get_cache_stats()
-        
-        print(f"\n[CACHE] 💾 === CACHE SUMMARY ===")
+        print("\n[CACHE] 💾 === CACHE SUMMARY ===")
         print(f"[CACHE] 📊 Hit Rate: {stats['hit_rate_percent']:.1f}%")
-        print(f"[CACHE] 🧠 Memory Items: {stats['memory_items']}/{self.max_memory_items} ({stats['memory_usage_percent']:.1f}%)")
-        print(f"[CACHE] 💽 Disk Items: {stats['disk_items']}")
-        print(f"[CACHE] 📁 Disk Usage: {stats['total_size_mb']:.1f}MB/{self.max_file_size_mb}MB ({stats['disk_usage_percent']:.1f}%)")
-        print(f"[CACHE] ✅ Hits: {stats['hits']}")
-        print(f"[CACHE] ❌ Misses: {stats['misses']}")
-        print(f"[CACHE] ===============================\n")
+        print(f"[CACHE] 🧠 Memory Items: {stats['memory_items']}/{self.max_memory_items}")
+        print(f"[CACHE] 💽 Disk Items: {stats['disk_items']} ({stats['total_size_mb']:.2f} MB)")
+        print("[CACHE] ===============================\n")
 
 
-# Specialized cache classes
 class ResponseCache(CacheManager):
-    """Cache chuyên dụng cho AI responses"""
-    
-    def __init__(self):
-        super().__init__(cache_dir="utils/cache/responses", max_memory_items=500)
-        self.response_patterns = {}
-    
-    def cache_response(self, user_message, response, user_id="default", ttl_seconds=7200):
-        """Cache AI response"""
-        # Tạo key từ message và user context
+    """Cache cho phản hồi AI; chỉ trả kết quả khớp chính xác (user_id, message) theo mặc định."""
+
+    def __init__(self, cache_dir: Optional[str] = None):
+        super().__init__(
+            cache_dir=cache_dir or os.path.join(get_data_dir("cache"), "responses"),
+            max_memory_items=500,
+        )
+        # Giới hạn từ khóa trong index để tránh rò rỉ bộ nhớ khi chạy 24/7
+        self.response_patterns: OrderedDict[str, List[str]] = OrderedDict()
+        self.max_pattern_keys = 500
+
+    def cache_response(
+        self, user_message: str, response: str, user_id: str = "default", ttl_seconds: int = 3600
+    ) -> None:
         cache_key = self.generate_response_key(user_message, user_id)
-        
         response_data = {
-            'response': response,
-            'user_message': user_message,
-            'user_id': user_id,
-            'cached_at': datetime.now().isoformat()
+            "response": response,
+            "user_message": user_message,
+            "user_id": user_id,
+            "cached_at": datetime.now().isoformat(),
         }
-        
         self.set(cache_key, response_data, ttl_seconds)
-        
-        # Lưu pattern để tìm similar responses
         self.save_response_pattern(user_message, cache_key)
-    
-    def get_cached_response(self, user_message, user_id="default"):
-        """Lấy cached response"""
+
+    def get_cached_response(
+        self, user_message: str, user_id: str = "default", allow_fuzzy: bool = False
+    ) -> Optional[str]:
         cache_key = self.generate_response_key(user_message, user_id)
         cached_data = self.get(cache_key)
-        
-        if cached_data:
-            return cached_data['response']
-        
-        # Tìm similar response
-        return self.find_similar_response(user_message, user_id)
-    
-    def generate_response_key(self, message, user_id):
-        """Tạo key cho response cache"""
-        # Normalize message
-        normalized = message.lower().strip()
-        return self.generate_cache_key(f"{normalized}_{user_id}")
-    
-    def save_response_pattern(self, message, cache_key):
-        """Lưu pattern để tìm similar responses"""
-        words = set(message.lower().split())
-        for word in words:
-            if len(word) > 3:  # Chỉ lưu từ có ý nghĩa
-                if word not in self.response_patterns:
-                    self.response_patterns[word] = []
-                self.response_patterns[word].append(cache_key)
-    
-    def find_similar_response(self, message, user_id):
-        """Tìm response tương tự"""
-        words = set(message.lower().split())
-        candidate_keys = []
-        
-        for word in words:
-            if word in self.response_patterns:
-                candidate_keys.extend(self.response_patterns[word])
-        
-        # Tìm key xuất hiện nhiều nhất
-        if candidate_keys:
-            from collections import Counter
-            most_common_key = Counter(candidate_keys).most_common(1)[0][0]
-            cached_data = self.get(most_common_key)
-            
-            if cached_data:
-                return cached_data['response']
-        
+        if cached_data and cached_data.get("user_id") == user_id:
+            return cached_data.get("response")
+
+        if allow_fuzzy:
+            return self.find_similar_response(user_message, user_id)
         return None
+
+    def generate_response_key(self, message: str, user_id: str) -> str:
+        normalized = " ".join(message.lower().split())
+        return self.generate_cache_key({"user_id": user_id, "message": normalized})
+
+    def save_response_pattern(self, message: str, cache_key: str) -> None:
+        words = {w for w in message.lower().split() if len(w) > 3}
+        with self.lock:
+            for word in words:
+                keys = self.response_patterns.pop(word, [])
+                if cache_key not in keys:
+                    keys.append(cache_key)
+                if len(keys) > 20:
+                    keys = keys[-20:]
+                self.response_patterns[word] = keys
+                while len(self.response_patterns) > self.max_pattern_keys:
+                    self.response_patterns.popitem(last=False)
+
+    def find_similar_response(self, message: str, user_id: str) -> Optional[str]:
+        """Tìm câu trả lời tương tự trong phạm vi đúng user_id và độ giống >= 0.8."""
+        query_words = {w for w in message.lower().split() if len(w) > 2}
+        if not query_words:
+            return None
+
+        candidate_keys: List[str] = []
+        with self.lock:
+            for word in query_words:
+                if word in self.response_patterns:
+                    candidate_keys.extend(self.response_patterns[word])
+
+        best_response = None
+        best_score = 0.0
+        for candidate_key in set(candidate_keys):
+            cached_data = self.get(candidate_key)
+            if not cached_data or cached_data.get("user_id") != user_id:
+                continue
+            cached_words = {w for w in cached_data.get("user_message", "").lower().split() if len(w) > 2}
+            if not cached_words:
+                continue
+            union = query_words | cached_words
+            score = len(query_words & cached_words) / len(union) if union else 0.0
+            if score >= 0.8 and score > best_score:
+                best_score = score
+                best_response = cached_data.get("response")
+
+        return best_response
 
 
 class ImageCache(CacheManager):
-    """Cache chuyên dụng cho images"""
-    
-    def __init__(self):
-        super().__init__(cache_dir="utils/cache/images", max_memory_items=100, max_file_size_mb=500)
-    
-    def cache_image(self, description, image_url, ttl_seconds=86400):
-        """Cache image URL"""
-        cache_key = self.generate_cache_key(description.lower().strip())
-        
+    """Cache kết quả tạo ảnh theo prompt mô tả."""
+
+    def __init__(self, cache_dir: Optional[str] = None):
+        super().__init__(
+            cache_dir=cache_dir or os.path.join(get_data_dir("cache"), "images"),
+            max_memory_items=100,
+            max_file_size_mb=500,
+            persist_threshold_bytes=0,
+        )
+
+    def cache_image(
+        self,
+        description: str,
+        image_ref: str,
+        ttl_seconds: int = 86400,
+        is_file: bool = True,
+    ) -> None:
+        cache_key = self.generate_cache_key(" ".join(description.lower().split()))
         image_data = {
-            'url': image_url,
-            'description': description,
-            'cached_at': datetime.now().isoformat()
+            "url": None if is_file else image_ref,
+            "file_path": image_ref if is_file else None,
+            "description": description,
+            "cached_at": datetime.now().isoformat(),
         }
-        
-        self.set(cache_key, image_data, ttl_seconds)
-    
-    def get_cached_image(self, description):
-        """Lấy cached image"""
-        cache_key = self.generate_cache_key(description.lower().strip())
+        self.set(cache_key, image_data, ttl_seconds, persist=True)
+
+    def get_cached_image(self, description: str) -> Optional[Dict[str, Any]]:
+        cache_key = self.generate_cache_key(" ".join(description.lower().split()))
         cached_data = self.get(cache_key)
-        
-        if cached_data:
-            return cached_data['url']
-        
-        return None
+        if not cached_data:
+            return None
+        file_path = cached_data.get("file_path")
+        if file_path and not os.path.exists(file_path):
+            self.delete(cache_key)
+            return None
+        return cached_data
 
 
-# Singleton instances
-_cache_manager = None
-_response_cache = None
-_image_cache = None
+_cache_manager: Optional[CacheManager] = None
+_response_cache: Optional[ResponseCache] = None
+_image_cache: Optional[ImageCache] = None
+_cache_lock = threading.Lock()
 
-def get_cache_manager():
-    """Lấy instance singleton của CacheManager"""
+
+def get_cache_manager() -> CacheManager:
     global _cache_manager
-    if _cache_manager is None:
-        _cache_manager = CacheManager()
-    return _cache_manager
+    with _cache_lock:
+        if _cache_manager is None:
+            _cache_manager = CacheManager()
+        return _cache_manager
 
-def get_response_cache():
-    """Lấy instance singleton của ResponseCache"""
+
+def get_response_cache() -> ResponseCache:
     global _response_cache
-    if _response_cache is None:
-        _response_cache = ResponseCache()
-    return _response_cache
+    with _cache_lock:
+        if _response_cache is None:
+            _response_cache = ResponseCache()
+        return _response_cache
 
-def get_image_cache():
-    """Lấy instance singleton của ImageCache"""
+
+def get_image_cache() -> ImageCache:
     global _image_cache
-    if _image_cache is None:
-        _image_cache = ImageCache()
-    return _image_cache
+    with _cache_lock:
+        if _image_cache is None:
+            _image_cache = ImageCache()
+        return _image_cache
 
 
-# Decorator cho caching
-def cache_result(ttl_seconds=3600, cache_key_func=None):
-    """Decorator để cache kết quả function"""
+def reset_cache_managers() -> None:
+    global _cache_manager, _response_cache, _image_cache
+    with _cache_lock:
+        _cache_manager = None
+        _response_cache = None
+        _image_cache = None
+
+
+def cache_result(ttl_seconds: int = 3600, cache_key_func=None):
     def decorator(func):
         def wrapper(*args, **kwargs):
             cache_manager = get_cache_manager()
-            
-            # Tạo cache key
             if cache_key_func:
                 cache_key = cache_key_func(*args, **kwargs)
             else:
                 cache_key = cache_manager.generate_cache_key(f"{func.__name__}_{args}_{kwargs}")
-            
-            # Kiểm tra cache
             cached_result = cache_manager.get(cache_key)
             if cached_result is not None:
                 return cached_result
-            
-            # Tính toán và cache
             result = func(*args, **kwargs)
             cache_manager.set(cache_key, result, ttl_seconds)
-            
             return result
+
         return wrapper
+
     return decorator
-
-
-if __name__ == "__main__":
-    # Test cache manager
-    cache = get_cache_manager()
-    
-    # Test basic caching
-    cache.set("test_key", "test_value", ttl_seconds=10)
-    print(f"Cached value: {cache.get('test_key')}")
-    
-    # Test response cache
-    response_cache = get_response_cache()
-    response_cache.cache_response("Hello", "Hi there!", "user1")
-    cached_response = response_cache.get_cached_response("Hello", "user1")
-    print(f"Cached response: {cached_response}")
-    
-    # Test image cache
-    image_cache = get_image_cache()
-    image_cache.cache_image("sunset", "https://example.com/sunset.jpg")
-    cached_image = image_cache.get_cached_image("sunset")
-    print(f"Cached image: {cached_image}")
-    
-    # Print summaries
-    cache.print_cache_summary()
-    response_cache.print_cache_summary()
-    image_cache.print_cache_summary()
-    
-    # Cleanup
-    cache.cleanup_expired() 

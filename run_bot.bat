@@ -1,26 +1,29 @@
 @echo off
-title InstaChatBot
+title InstaChat v2.0
 echo.
 echo ================================================
-echo          🤖 INSTACHATBOT LAUNCHER
+echo          INSTACHAT v2.0 LAUNCHER
 echo ================================================
 echo.
 
-:: Kiểm tra Python
-python --version >nul 2>&1
+if exist ".venv\Scripts\python.exe" (
+    set PYTHON_CMD=.venv\Scripts\python.exe
+) else (
+    set PYTHON_CMD=python
+)
+
+%PYTHON_CMD% --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo ❌ Python not found! Please install Python 3.8+
+    echo [ERROR] Python not found! Please install Python 3.10+
     pause
     exit /b 1
 )
 
-:: Chạy startup script
-echo 🚀 Starting InstaChatBot...
-echo.
-python start_bot.py
+echo [INFO] Running with %PYTHON_CMD%
+%PYTHON_CMD% start_bot.py %*
+set EXIT_CODE=%errorlevel%
 
-:: Pause để xem kết quả
 echo.
 echo ================================================
-echo Press any key to exit...
-pause >nul 
+echo Exited with code %EXIT_CODE%
+exit /b %EXIT_CODE%

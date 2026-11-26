@@ -1,24 +1,22 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
 echo ""
 echo "================================================"
-echo "          🤖 INSTACHATBOT LAUNCHER"
+echo "         INSTACHAT v2.0 LAUNCHER"
 echo "================================================"
 echo ""
 
-# Kiểm tra Python
-if ! command -v python3 &> /dev/null; then
-    echo "❌ Python3 not found! Please install Python 3.8+"
+if [ -x ".venv/bin/python" ]; then
+    PYTHON_CMD=".venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_CMD="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_CMD="python"
+else
+    echo "❌ Python 3.10+ not found!"
     exit 1
 fi
 
-# Chạy startup script
-echo "🚀 Starting InstaChatBot..."
-echo ""
-python3 start_bot.py
-
-# Pause để xem kết quả
-echo ""
-echo "================================================"
-echo "Press Enter to exit..."
-read 
+echo "🚀 Running with $PYTHON_CMD"
+exec "$PYTHON_CMD" start_bot.py "$@"

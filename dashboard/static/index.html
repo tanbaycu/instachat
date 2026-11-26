@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>InstaChat v2.0 — Telemetry &amp; AI Sandbox</title>
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --surface: #121826;
+      --surface-alt: #182133;
+      --border: #232f45;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --ok: #10b981;
+      --warn: #f59e0b;
+      --err: #ef4444;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+    }
+
+    .container {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 20px 16px 40px;
+    }
+
+    header.topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 20px;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+
+    .brand p {
+      margin: 2px 0 0;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    .status-strip {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      font-family: var(--mono);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--ok);
+    }
+
+    .dot.warn { background: var(--warn); }
+    .dot.err { background: var(--err); }
+
+    button.btn {
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--surface-alt);
+      color: var(--text);
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    button.btn:hover { background: #1f2b42; }
+    button.btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+    button.btn-primary:hover { background: var(--accent-hover); }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+    }
+
+    .card-label {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin: 0 0 8px;
+    }
+
+    .card-value {
+      font-family: var(--mono);
+      font-size: 1.45rem;
+      font-weight: 700;
+      margin: 0 0 6px;
+    }
+
+    .card-sub {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin: 0;
+    }
+
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 16px;
+    }
+
+    @media (max-width: 900px) {
+      .workspace-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .section-title {
+      margin: 0 0 12px;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .chat-log {
+      height: 320px;
+      overflow-y: auto;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .msg {
+      max-width: 85%;
+      padding: 9px 12px;
+      border-radius: 10px;
+      font-size: 0.9rem;
+      word-break: break-word;
+    }
+
+    .msg-user {
+      align-self: flex-end;
+      background: #1d4ed8;
+      color: #ffffff;
+    }
+
+    .msg-bot {
+      align-self: flex-start;
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+    }
+
+    .msg-meta {
+      display: block;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+      font-family: var(--mono);
+    }
+
+    .chat-form {
+      display: flex;
+      gap: 8px;
+    }
+
+    .chat-input {
+      flex: 1;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-size: 0.9rem;
+    }
+
+    .chat-input:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
+    .notif-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      max-height: 372px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .notif-item {
+      padding: 9px 11px;
+      border-radius: 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      font-size: 0.84rem;
+    }
+
+    .notif-head {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-bottom: 3px;
+    }
+
+    .lvl-error, .lvl-critical { color: var(--err); font-weight: 700; }
+    .lvl-warning { color: var(--warn); font-weight: 700; }
+    .lvl-info { color: var(--ok); font-weight: 700; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <div class="brand">
+        <h1>InstaChat v2.0 Console</h1>
+        <p>Giám sát hệ thống, Anti-Detection &amp; AI Sandbox Chat</p>
+      </div>
+      <div class="status-strip">
+        <span class="badge" id="badge-health" aria-live="polite">
+          <span class="dot" id="dot-health"></span>
+          <span id="txt-health">Loading...</span>
+        </span>
+        <span class="badge" id="txt-model">Model: --</span>
+        <span class="badge" id="txt-uptime">Uptime: --</span>
+        <button type="button" class="btn" id="btn-pause-toggle" aria-label="Tạm dừng hoặc tiếp tục bot">Tạm dừng</button>
+        <button type="button" class="btn" id="btn-refresh" aria-label="Làm mới dữ liệu">Làm mới</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="metrics-grid" aria-label="Chỉ số hệ thống">
+        <article class="card">
+          <h2 class="card-label">CPU / RAM</h2>
+          <p class="card-value" id="val-sys">--</p>
+          <p class="card-sub" id="sub-sys">Đang thu thập...</p>
+        </article>
+
+        <article class="card">
+          <h2 class="card-label">Outbound Safety Budget</h2>
+          <p class="card-value" id="val-budget">--</p>
+          <p class="card-sub" id="sub-budget">Phút / Giờ / Ngày</p>
+        </article>
+
+        <article class="card">
+          <h2 class="card-label">Stealth &amp; Proxy</h2>
+          <p class="card-value" id="val-stealth">--</p>
+          <p class="card-sub" id="sub-stealth">Active hours: --</p>
+        </article>
+
+        <article class="card">
+          <h2 class="card-label">SQLite Memory</h2>
+          <p class="card-value" id="val-memory">--</p>
+          <p class="card-sub" id="sub-memory">Ngắn hạn / Dài hạn</p>
+        </article>
+      </section>
+
+      <div class="workspace-grid">
+        <section class="card" aria-label="AI Sandbox Chat">
+          <h2 class="section-title">AI Sandbox Chat (Kiểm thử không cần Instagram)</h2>
+          <div class="chat-log" id="chat-log" aria-live="polite">
+            <div class="msg msg-bot">
+              Xin chào! Bạn có thể nhắn thử tại đây để kiểm tra prompt, memory và bộ lọc bảo mật.
+            </div>
+          </div>
+          <form class="chat-form" id="chat-form">
+            <label for="chat-input" style="position:absolute;left:-9999px;">Nhập tin nhắn thử nghiệm</label>
+            <input
+              id="chat-input"
+              class="chat-input"
+              type="text"
+              placeholder="Nhập tin nhắn để test AI bot..."
+              autocomplete="off"
+              required
+            >
+            <button type="submit" class="btn btn-primary" id="btn-send">Gửi</button>
+          </form>
+        </section>
+
+        <aside class="card" aria-label="Thông báo hệ thống">
+          <h2 class="section-title">Nhật ký sự kiện gần đây</h2>
+          <ul class="notif-list" id="notif-list">
+            <li class="notif-item">Đang tải nhật ký...</li>
+          </ul>
+        </aside>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function setText(id, value) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    }
+
+    async function loadOverview() {
+      try {
+        const res = await fetch("/api/overview");
+        if (!res.ok) return;
+        const data = await res.json();
+
+        const health = data.health || {};
+        const perf = data.performance || {};
+        const budget = data.outbound_budget || {};
+        const stealth = data.stealth || {};
+        const memory = data.memory || {};
+        const ai = data.ai || {};
+        const runtime = data.runtime || {};
+
+        setText("txt-health", `${health.status || "OK"} (${health.score ?? 100}/100)`);
+        const dot = document.getElementById("dot-health");
+        if (dot) {
+          dot.className = "dot" + ((health.score ?? 100) < 60 ? " err" : (health.score ?? 100) < 80 ? " warn" : "");
+        }
+
+        setText("txt-model", `Model: ${ai.model || "--"}`);
+        setText("txt-uptime", `Uptime: ${Math.round(runtime.uptime_seconds || 0)}s`);
+
+        const pauseBtn = document.getElementById("btn-pause-toggle");
+        if (pauseBtn) {
+          pauseBtn.dataset.paused = runtime.paused ? "true" : "false";
+          pauseBtn.textContent = runtime.paused ? "Tiếp tục" : "Tạm dừng";
+        }
+
+        setText(
+          "val-sys",
+          `${(perf.current_cpu || 0).toFixed(0)}% / ${(perf.current_memory || 0).toFixed(0)}%`
+        );
+        setText(
+          "sub-sys",
+          `Avg RT: ${(perf.avg_response_time || 0).toFixed(2)}s | Err: ${data.errors?.total_errors || 0}`
+        );
+
+        setText(
+          "val-budget",
+          `${budget.sent_last_hour || 0}/${budget.limit_per_hour || 60} giờ`
+        );
+        setText(
+          "sub-budget",
+          `Phút: ${budget.sent_last_minute || 0}/${budget.limit_per_minute || 6} | Ngày: ${budget.sent_last_day || 0}/${budget.limit_per_day || 300}`
+        );
+
+        setText("val-stealth", runtime.proxy || "direct");
+        setText(
+          "sub-stealth",
+          `Active: ${stealth.active_hours || "24/7"} | Profile: ${stealth.persistent_profile ? "Persistent" : "Temp"}`
+        );
+
+        setText(
+          "val-memory",
+          `${memory.short_context_count || 0} / ${memory.long_memories_count || 0}`
+        );
+        setText(
+          "sub-memory",
+          `Conversations (7d): ${data.analytics?.recent_conversations || 0}`
+        );
+      } catch (err) {
+        setText("txt-health", "Offline");
+      }
+    }
+
+    async function loadNotifications() {
+      try {
+        const res = await fetch("/api/notifications");
+        if (!res.ok) return;
+        const data = await res.json();
+        const list = document.getElementById("notif-list");
+        if (!list) return;
+
+        list.innerHTML = "";
+        const items = data.notifications || [];
+        if (items.length === 0) {
+          const empty = document.createElement("li");
+          empty.className = "notif-item";
+          empty.textContent = "Chưa có sự kiện nào.";
+          list.appendChild(empty);
+          return;
+        }
+
+        for (const item of items) {
+          const li = document.createElement("li");
+          li.className = "notif-item";
+
+          const head = document.createElement("div");
+          head.className = "notif-head";
+
+          const lvl = document.createElement("span");
+          lvl.className = `lvl-${item.level || "info"}`;
+          lvl.textContent = (item.level || "info").toUpperCase();
+
+          const ts = document.createElement("span");
+          ts.textContent = (item.timestamp || "").slice(11, 19);
+
+          head.appendChild(lvl);
+          head.appendChild(ts);
+
+          const body = document.createElement("div");
+          body.textContent = item.context ? `[${item.context}] ${item.message}` : item.message;
+
+          li.appendChild(head);
+          li.appendChild(body);
+          list.appendChild(li);
+        }
+      } catch (err) {
+        // Ignore transient poll errors
+      }
+    }
+
+    function appendChatMessage(role, text, metaText) {
+      const log = document.getElementById("chat-log");
+      if (!log) return;
+
+      const bubble = document.createElement("div");
+      bubble.className = `msg ${role === "user" ? "msg-user" : "msg-bot"}`;
+      bubble.textContent = text;
+
+      if (metaText) {
+        const meta = document.createElement("span");
+        meta.className = "msg-meta";
+        meta.textContent = metaText;
+        bubble.appendChild(meta);
+      }
+
+      log.appendChild(bubble);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    document.getElementById("chat-form")?.addEventListener("submit", async (evt) => {
+      evt.preventDefault();
+      const input = document.getElementById("chat-input");
+      const btn = document.getElementById("btn-send");
+      if (!input || !input.value.trim()) return;
+
+      const msg = input.value.trim();
+      input.value = "";
+      appendChatMessage("user", msg);
+
+      if (btn) btn.disabled = true;
+      try {
+        const res = await fetch("/api/sandbox/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: msg, username: "sandbox_user" }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          appendChatMessage(
+            "bot",
+            data.reply || "",
+            `${data.mode || "bot"} · ${data.latency_ms ?? 0}ms`
+          );
+          loadOverview();
+          loadNotifications();
+        } else {
+          appendChatMessage("bot", data.error || "Lỗi không xác định");
+        }
+      } catch (err) {
+        appendChatMessage("bot", "Không thể kết nối tới server.");
+      } finally {
+        if (btn) btn.disabled = false;
+        input.focus();
+      }
+    });
+
+    document.getElementById("btn-pause-toggle")?.addEventListener("click", async () => {
+      const btn = document.getElementById("btn-pause-toggle");
+      const currentlyPaused = btn?.dataset.paused === "true";
+      const endpoint = currentlyPaused ? "/api/control/resume" : "/api/control/pause";
+      try {
+        await fetch(endpoint, { method: "POST" });
+        await loadOverview();
+      } catch (err) {
+        // Ignore transient network errors
+      }
+    });
+
+    document.getElementById("btn-refresh")?.addEventListener("click", () => {
+      loadOverview();
+      loadNotifications();
+    });
+
+    loadOverview();
+    loadNotifications();
+    setInterval(() => {
+      loadOverview();
+      loadNotifications();
+    }, 5000);
+  </script>
+</body>
+</html>

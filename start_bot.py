@@ -1,314 +1,284 @@
 #!/usr/bin/env python3
 """
-InstaChatBot Startup Script
-Tự động setup và khởi chạy bot với validation đầy đủ
+InstaChat v2.0 Startup & CLI Launcher.
+Hỗ trợ 4 chế độ: run (Instagram bot), cli (chat terminal), check (health check), dashboard (Web UI).
 """
 
+import argparse
 import os
-import sys
+import shutil
 import subprocess
+import sys
 import time
-from pathlib import Path
+from typing import List, Optional
 
-# Load environment variables from .env file
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
-    print("⚠️  python-dotenv not installed, skipping .env file loading")
-    print("💡 Install with: pip install python-dotenv")
+    pass
 
-def check_python_version():
-    """Kiểm tra Python version"""
-    if sys.version_info < (3, 8):
-        print("❌ Python 3.8+ required!")
-        print(f"Current version: {sys.version}")
+
+def check_python_version() -> bool:
+    if sys.version_info < (3, 10):
+        print(f"❌ Yêu cầu Python 3.10+. Hiện tại: {sys.version}")
         return False
-    print(f"✅ Python version: {sys.version}")
+    print(f"✅ Python: {sys.version.split()[0]}")
     return True
 
-def install_requirements():
-    """Cài đặt requirements"""
-    print("📦 Checking requirements...")
-    
-    try:
-        # Kiểm tra requirements.txt
-        if not os.path.exists('requirements.txt'):
-            print("❌ requirements.txt not found!")
-            return False
-        
-        # Cài đặt requirements
-        print("📥 Installing requirements...")
-        result = subprocess.run([
-            sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'
-        ], capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            print("❌ Failed to install requirements!")
-            print(result.stderr)
-            return False
-        
-        print("✅ Requirements installed successfully!")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error installing requirements: {str(e)}")
-        return False
 
-def create_directories():
-    """Tạo các thư mục cần thiết"""
-    print("📁 Creating directories...")
-    
-    directories = [
-        'monitoring',
-        'security', 
-        'analytics',
-        'utils',
-        'config',
-        'memories',
-        'temp_memories_backup',
-        'chromium_temp_data_dir'
+def ensure_directories() -> None:
+    from config.config_manager import get_data_dir
+
+    for subdir in ("logs", "sessions", "memories", "cache", "analytics", "profiles", "generated_images"):
+        get_data_dir(subdir)
+    print(f"✅ Thư mục runtime: {get_data_dir()}")
+
+
+def install_requirements() -> bool:
+    if not os.path.exists("requirements.txt"):
+        print("❌ Không tìm thấy requirements.txt")
+        return False
+    print("📥 Đang cài đặt dependencies từ requirements.txt...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(result.stderr)
+        return False
+    print("✅ Cài đặt dependencies thành công!")
+    return True
+
+
+def check_imports() -> bool:
+    required = [
+        ("selenium", "selenium"),
+        ("google.genai", "google-genai"),
+        ("psutil", "psutil"),
+        ("cryptography", "cryptography"),
+        ("requests", "requests"),
+        ("yaml", "pyyaml"),
+        ("PIL", "pillow"),
     ]
-    
-    for directory in directories:
-        Path(directory).mkdir(exist_ok=True)
-        print(f"✅ Created: {directory}")
-    
-    return True
-
-def validate_files():
-    """Kiểm tra các file cần thiết"""
-    print("🔍 Validating files...")
-    
-    required_files = [
-        'app.py',
-        'core.py',
-        'image_generator.py',
-        'llm_memories_manager.py',
-        'monitoring/performance_monitor.py',
-        'monitoring/error_handler.py',
-        'security/security_manager.py',
-        'security/session_manager.py',
-        'analytics/analytics_engine.py',
-        'analytics/conversation_insights.py',
-        'utils/cache_manager.py',
-        'utils/notification_system.py',
-        'config/config_manager.py'
-    ]
-    
-    missing_files = []
-    for file_path in required_files:
-        if not os.path.exists(file_path):
-            missing_files.append(file_path)
-        else:
-            print(f"✅ Found: {file_path}")
-    
-    if missing_files:
-        print("❌ Missing files:")
-        for file_path in missing_files:
-            print(f"   - {file_path}")
-        return False
-    
-    print("✅ All required files found!")
-    return True
-
-def check_api_key():
-    """Kiểm tra API key"""
-    print("🔑 Checking API key...")
-    
-    api_key = os.getenv('GEMINI_API_KEY')
-    if not api_key:
-        print("❌ GEMINI_API_KEY not found in environment")
-        print("💡 Solutions:")
-        print("   1. Create .env file from env_example")
-        print("   2. Set environment: set GEMINI_API_KEY=your_key")
-        print("   3. Get API key from: https://makersuite.google.com/app/apikey")
-        return False
-    
-    if len(api_key) < 30:
-        print("⚠️ API key seems too short")
-        return False
-    
-    print("✅ API key found!")
-    return True
-
-def check_instagram_credentials():
-    """Kiểm tra Instagram credentials"""
-    print("📱 Checking Instagram credentials...")
-    
-    username = os.getenv('INSTAGRAM_USERNAME')
-    password = os.getenv('INSTAGRAM_PASSWORD')
-    target = os.getenv('TARGET_USERNAME')
-    
-    missing = []
-    if not username:
-        missing.append('INSTAGRAM_USERNAME')
-    if not password:
-        missing.append('INSTAGRAM_PASSWORD')
-    if not target:
-        missing.append('TARGET_USERNAME')
-    
-    if missing:
-        print(f"❌ Missing credentials: {', '.join(missing)}")
-        print("💡 Solutions:")
-        print("   1. Create .env file from env_example")
-        print("   2. Set environment variables:")
-        for var in missing:
-            print(f"      set {var}=your_value")
-        return False
-    
-    print("✅ Instagram credentials found!")
-    return True
-
-def validate_config():
-    """Validate configuration"""
-    print("⚙️ Validating configuration...")
-    
-    try:
-        # Import config manager
-        sys.path.append('.')
-        from config.config_manager import get_config_manager
-        
-        config_manager = get_config_manager()
-        
-        # Validate each config
-        config_types = ['app', 'ai', 'security', 'monitoring', 'cache']
-        for config_type in config_types:
-            is_valid, errors = config_manager.validate_config(config_type)
-            if is_valid:
-                print(f"✅ {config_type} config valid")
-            else:
-                print(f"⚠️ {config_type} config issues: {errors}")
-        
-        return True
-        
-    except Exception as e:
-        print(f"⚠️ Config validation error: {str(e)}")
-        return True  # Non-critical
-
-def test_imports():
-    """Test critical imports"""
-    print("🧪 Testing imports...")
-    
-    critical_imports = [
-        ('selenium', 'selenium'),
-        ('google.generativeai', 'google-generativeai'),
-        ('psutil', 'psutil'),
-        ('cryptography', 'cryptography'),
-        ('requests', 'requests')
-    ]
-    
-    failed_imports = []
-    for module_name, package_name in critical_imports:
+    missing: List[str] = []
+    for mod, pkg in required:
         try:
-            __import__(module_name)
-            print(f"✅ {module_name}")
+            __import__(mod)
         except ImportError:
-            failed_imports.append(package_name)
-            print(f"❌ {module_name}")
-    
-    if failed_imports:
-        print(f"❌ Failed imports: {failed_imports}")
-        print("💡 Try: pip install " + " ".join(failed_imports))
+            missing.append(pkg)
+
+    if missing:
+        print(f"❌ Thiếu package: {', '.join(missing)}")
+        print(f"💡 Chạy: {sys.executable} -m pip install {' '.join(missing)}")
         return False
-    
-    print("✅ All imports successful!")
+    print("✅ Tất cả thư viện bắt buộc đều sẵn sàng.")
     return True
 
-def setup_environment():
-    """Setup environment variables"""
-    print("🌍 Setting up environment...")
-    
-    # Set default environment variables if not exist
-    env_vars = {
-        'PYTHONPATH': '.',
-        'PYTHONUNBUFFERED': '1'
-    }
-    
-    for var, value in env_vars.items():
-        if not os.getenv(var):
-            os.environ[var] = value
-            print(f"✅ Set {var}={value}")
-    
-    return True
 
-def show_startup_info():
-    """Hiển thị thông tin khởi động"""
-    print("\n" + "="*50)
-    print("🤖 INSTACHATBOT STARTUP")
-    print("="*50)
-    print(f"📍 Working directory: {os.getcwd()}")
-    print(f"🐍 Python: {sys.executable}")
-    print(f"⏰ Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*50 + "\n")
+def detect_chrome_binary() -> Optional[str]:
+    for name in ("google-chrome", "chromium", "chromium-browser", "chrome"):
+        found = shutil.which(name)
+        if found:
+            return found
 
-def run_bot():
-    """Chạy bot chính"""
-    print("🚀 Starting InstaChatBot...")
-    
-    try:
-        # Import và chạy bot
-        sys.path.append('.')
-        
-        # Import app module
-        import app
-        
-        print("✅ Bot started successfully!")
-        print("📱 Bot is now running...")
-        print("⏹️ Press Ctrl+C to stop")
-        
-        # Bot sẽ chạy trong app.py
-        
-    except KeyboardInterrupt:
-        print("\n⏹️ Bot stopped by user")
-    except Exception as e:
-        print(f"\n❌ Bot error: {str(e)}")
-        return False
-    
-    return True
-
-def main():
-    """Main function"""
-    show_startup_info()
-    
-    # Validation steps
-    steps = [
-        ("Python Version", check_python_version),
-        ("Create Directories", create_directories),
-        ("Install Requirements", install_requirements),
-        ("Validate Files", validate_files),
-        ("Test Imports", test_imports),
-        ("Check API Key", check_api_key),
-        ("Check Instagram Credentials", check_instagram_credentials),
-        ("Setup Environment", setup_environment),
-        ("Validate Config", validate_config)
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     ]
-    
-    print("🔧 VALIDATION STEPS:")
-    print("-" * 30)
-    
-    for step_name, step_func in steps:
-        print(f"\n📋 {step_name}...")
-        if not step_func():
-            print(f"❌ {step_name} failed!")
-            print("🛑 Startup aborted!")
-            return False
-    
-    print("\n" + "="*50)
-    print("✅ ALL VALIDATIONS PASSED!")
-    print("="*50)
-    
-    # Chạy bot
-    return run_bot()
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def run_environment_check() -> bool:
+    print("\n" + "=" * 56)
+    print("🤖 INSTACHAT v2.0 — ENVIRONMENT HEALTH CHECK")
+    print("=" * 56)
+
+    ok = True
+    if not check_python_version():
+        ok = False
+
+    ensure_directories()
+
+    if not check_imports():
+        ok = False
+
+    chrome_path = detect_chrome_binary()
+    if chrome_path:
+        print(f"✅ Chrome/Chromium: {chrome_path}")
+    else:
+        print("⚠️ Chưa tìm thấy Chrome/Chromium trên PATH (chỉ cần cho chế độ --mode run)")
+
+    from config.config_manager import get_config_manager
+
+    cfg = get_config_manager()
+    for group in cfg.CONFIG_GROUPS:
+        valid, errs = cfg.validate_config(group)
+        if valid:
+            print(f"✅ Config '{group}': hợp lệ")
+        else:
+            print(f"❌ Config '{group}' lỗi: {errs}")
+            ok = False
+
+    api_key = os.getenv("GEMINI_API_KEY") or cfg.get("ai", "api_key")
+    if api_key and api_key != "your_gemini_api_key_here":
+        print(f"✅ GEMINI_API_KEY: đã cấu hình (model={cfg.get('ai', 'model')})")
+    else:
+        print("⚠️ GEMINI_API_KEY: chưa cấu hình (chế độ sandbox demo vẫn dùng được)")
+
+    ig_user = os.getenv("INSTAGRAM_USERNAME") or cfg.get("app", "instagram_username")
+    ig_target = os.getenv("TARGET_USERNAME") or cfg.get("app", "target_username")
+    if ig_user and ig_target:
+        print(f"✅ Instagram config: @{ig_user} -> @{ig_target}")
+    else:
+        print("⚠️ Instagram credentials: chưa điền đủ trong .env")
+
+    proxy_cfg = cfg.get("proxy") or {}
+    if proxy_cfg.get("url") or proxy_cfg.get("list"):
+        from automation.proxy_manager import ProxyPool
+
+        pool = ProxyPool(proxy_url=proxy_cfg.get("url"), proxy_list=proxy_cfg.get("list"))
+        print(f"✅ ProxyPool: đã nạp {len(pool.proxies)} proxy")
+        if proxy_cfg.get("check_on_startup") and pool.proxies:
+            healthy, info = pool.check_health(pool.proxies[0])
+            print(f"   Proxy check: {'OK -> IP ' + info if healthy else 'FAIL -> ' + info}")
+
+    print("=" * 56 + "\n")
+    return ok
+
+
+def run_cli_chat() -> int:
+    """Chế độ chat tương tác trực tiếp trên terminal để test AI & SQLite Memory."""
+    from core import cleanup_insta_bot, create_insta_bot
+
+    print("\n" + "=" * 56)
+    print("💬 INSTACHAT CLI SANDBOX (gõ /help để xem lệnh)")
+    print("=" * 56)
+
+    try:
+        bot = create_insta_bot()
+    except Exception as exc:
+        print(f"❌ Không thể khởi tạo AI Bot: {exc}")
+        print("💡 Hãy thiết lập GEMINI_API_KEY trong file .env trước khi chạy --mode cli.")
+        return 1
+
+    username = os.getenv("TARGET_USERNAME") or "cli_user"
+    try:
+        while True:
+            try:
+                user_msg = input(f"\n[{username}] > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n👋 Thoát CLI chat.")
+                break
+
+            if not user_msg:
+                continue
+            if user_msg in {"/exit", "/quit"}:
+                break
+            if user_msg == "/help":
+                print("Lệnh hỗ trợ: /stats, /memory, /clear, /exit")
+                continue
+            if user_msg == "/stats":
+                print(bot.get_memory_stats(username=username))
+                continue
+            if user_msg == "/memory":
+                print(bot.memory_store.get_short_context_lines(username))
+                continue
+            if user_msg == "/clear":
+                bot.clear_short_memory(username=username)
+                print("🗑️ Đã xóa ngữ cảnh ngắn hạn.")
+                continue
+
+            reply = bot.generate_response(user_msg, username=username)
+            print(f"[InstaChat] {reply}")
+    finally:
+        cleanup_insta_bot(bot)
+
+    return 0
+
+
+def run_standalone_dashboard(host: str, port: int) -> int:
+    from dashboard.server import DashboardServer
+
+    server = DashboardServer(host=host, port=port)
+    server.set_runtime_state(running=True, mode="dashboard")
+    server.start()
+    print(f"🌐 Dashboard đang chạy tại {server.base_url} (nhấn Ctrl+C để dừng)")
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        print("\n🛑 Đang dừng Dashboard...")
+    finally:
+        server.stop()
+    return 0
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="InstaChat v2.0 Launcher")
+    parser.add_argument(
+        "--mode",
+        choices=("run", "cli", "check", "dashboard"),
+        default="run",
+        help="Chế độ chạy: run (bot Instagram), cli (terminal), check (kiểm tra), dashboard (web UI)",
+    )
+    parser.add_argument("--dashboard", action="store_true", help="Bật kèm Web Dashboard khi chạy bot")
+    parser.add_argument("--install", action="store_true", help="Cài đặt requirements trước khi chạy")
+    parser.add_argument("--skip-install", action="store_true", help="Bỏ qua bước kiểm tra/cài đặt pip")
+    parser.add_argument("--target", type=str, default=None, help="Username Instagram mục tiêu")
+    parser.add_argument("--proxy", type=str, default=None, help="Proxy URL (vd: http://user:pass@host:port)")
+    parser.add_argument("--headless", dest="headless", action="store_true", default=None)
+    parser.add_argument("--no-headless", dest="headless", action="store_false")
+    parser.add_argument("--host", type=str, default=None, help="Host cho Dashboard")
+    parser.add_argument("--port", type=int, default=None, help="Port cho Dashboard")
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
+
+    if args.install and not args.skip_install:
+        if not install_requirements():
+            return 1
+
+    if args.mode == "check":
+        return 0 if run_environment_check() else 1
+
+    if not check_python_version() or not check_imports():
+        return 1
+    ensure_directories()
+
+    from config.config_manager import get_config_manager
+
+    dash_cfg = get_config_manager().get("dashboard") or {}
+    host = args.host or dash_cfg.get("host", "127.0.0.1")
+    port = int(args.port or dash_cfg.get("port", 8765))
+
+    if args.mode == "dashboard":
+        return run_standalone_dashboard(host, port)
+
+    if args.mode == "cli":
+        return run_cli_chat()
+
+    from app import run_app
+
+    overrides = {
+        "target": args.target,
+        "proxy_url": args.proxy,
+        "headless": args.headless,
+        "dashboard_host": host,
+        "dashboard_port": port,
+    }
+    return run_app(config_overrides=overrides, start_dashboard=bool(args.dashboard))
+
 
 if __name__ == "__main__":
-    try:
-        success = main()
-        if success:
-            print("\n✅ Bot completed successfully!")
-        else:
-            print("\n❌ Bot failed!")
-            sys.exit(1)
-    except Exception as e:
-        print(f"\n💥 Critical error: {str(e)}")
-        sys.exit(1) 
+    raise SystemExit(main())

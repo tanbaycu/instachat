@@ -1,13 +1,16 @@
+from collections import deque
+from datetime import datetime, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from enum import Enum
 import json
 import os
-import time
-import threading
-from datetime import datetime, timedelta
-from collections import deque
-from enum import Enum
 import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional
+
+from config.config_manager import get_config_manager, get_data_dir
 
 
 class NotificationLevel(Enum):
@@ -25,33 +28,34 @@ class NotificationChannel(Enum):
 
 
 class NotificationSystem:
-    def __init__(self, config_file="utils/notifications_config.json"):
-        self.config_file = config_file
-        self.notifications = deque(maxlen=1000)
-        self.subscribers = {}
-        self.channels = {}
-        self.notification_stats = {
-            'total_sent': 0,
-            'by_level': {level.value: 0 for level in NotificationLevel},
-            'by_channel': {channel.value: 0 for channel in NotificationChannel}
-        }
-        
-        # Load config
-        self.config = self.load_config()
-        
-        # Setup channels
-        self.setup_channels()
-        
-        # Background worker
-        self.worker_active = False
-        self.notification_queue = deque()
-        self.queue_lock = threading.Lock()
-        
-        print("[NOTIFY] 🔔 Notification System đã khởi tạo")
+    """Hệ thống thông báo đa kênh an toàn đa luồng, không gửi trùng và hỗ trợ tắt sạch."""
 
-    def load_config(self):
-        """Load notification configuration"""
-        default_config = {
+    LEVEL_PRIORITY = {"info": 0, "warning": 1, "error": 2, "critical": 3}
+
+    def __init__(self, config_file: Optional[str] = None):
+        self.config_file = config_file
+        self.notifications: deque = deque(maxlen=1000)
+        self.subscribers: Dict[str, List[Callable[[Dict[str, Any]], None]]] = {}
+        self.channels: Dict[NotificationChannel, Any] = {}
+        self.notification_stats: Dict[str, Any] = {
+            "total_sent": 0,
+            "by_level": {level.value: 0 for level in NotificationLevel},
+            "by_channel": {channel.value: 0 for channel in NotificationChannel},
+        }
+        self._lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
+        self.worker_active = False
+        self.worker_thread: Optional[threading.Thread] = None
+        self.notification_queue: deque = deque()
+
+        self.config = self.load_config()
+        self.setup_channels()
+
+    def load_config(self) -> Dict[str, Any]:
+        logs_dir = get_data_dir("logs")
+        mon_cfg = get_config_manager().get("monitoring", "notifications", {}) or {}
+        default_config: Dict[str, Any] = {
             "email": {
                 "enabled": False,
                 "smtp_server": "smtp.gmail.com",
@@ -59,469 +63,392 @@ class NotificationSystem:
                 "username": "",
                 "password": "",
                 "from_email": "",
-                "to_emails": []
+                "to_emails": [],
             },
             "file": {
-                "enabled": True,
-                "log_file": "utils/notifications.log",
-                "max_file_size_mb": 10
+                "enabled": "file" in mon_cfg.get("channels", ["console", "file"]),
+                "log_file": os.path.join(logs_dir, "notifications.log"),
+                "max_file_size_mb": 10,
             },
             "console": {
-                "enabled": True,
+                "enabled": "console" in mon_cfg.get("channels", ["console", "file"]),
                 "show_timestamp": True,
-                "colored_output": True
+                "colored_output": True,
             },
             "webhook": {
                 "enabled": False,
-                "url": "",
-                "headers": {}
+                "url": os.getenv("NOTIFICATION_WEBHOOK_URL", ""),
+                "headers": {},
             },
             "filters": {
-                "min_level": "info",
+                "min_level": mon_cfg.get("min_level", "info"),
                 "keywords_filter": [],
-                "rate_limit_per_minute": 60
-            }
+                "rate_limit_per_minute": mon_cfg.get("rate_limit_per_minute", 60),
+            },
         }
-        
-        try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                return {**default_config, **config}
-            else:
-                os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
-                with open(self.config_file, 'w', encoding='utf-8') as f:
-                    json.dump(default_config, f, indent=2, ensure_ascii=False)
-                return default_config
-        except Exception as e:
-            print(f"[NOTIFY] ⚠️ Lỗi load config: {str(e)}")
-            return default_config
 
-    def setup_channels(self):
-        """Setup notification channels"""
-        # Console channel
+        if self.config_file and os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    return {**default_config, **loaded}
+            except Exception as exc:
+                print(f"[NOTIFY] ⚠️ Lỗi đọc config notification: {exc}")
+
+        return default_config
+
+    def setup_channels(self) -> None:
+        self.channels.clear()
         if self.config["console"]["enabled"]:
             self.channels[NotificationChannel.CONSOLE] = ConsoleNotifier(self.config["console"])
-        
-        # File channel
         if self.config["file"]["enabled"]:
             self.channels[NotificationChannel.FILE] = FileNotifier(self.config["file"])
-        
-        # Email channel
         if self.config["email"]["enabled"]:
             self.channels[NotificationChannel.EMAIL] = EmailNotifier(self.config["email"])
-        
-        # Webhook channel
-        if self.config["webhook"]["enabled"]:
+        if self.config["webhook"]["enabled"] and self.config["webhook"].get("url"):
             self.channels[NotificationChannel.WEBHOOK] = WebhookNotifier(self.config["webhook"])
 
-    def send_notification(self, message, level=NotificationLevel.INFO, context="", metadata=None):
-        """Gửi notification"""
+    def send_notification(
+        self,
+        message: str,
+        level: NotificationLevel = NotificationLevel.INFO,
+        context: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        now = time.time()
         notification = {
-            'id': self.generate_notification_id(),
-            'timestamp': datetime.now().isoformat(),
-            'message': message,
-            'level': level.value,
-            'context': context,
-            'metadata': metadata or {}
+            "id": self.generate_notification_id(now),
+            "timestamp": datetime.now().isoformat(),
+            "epoch_ts": now,
+            "message": message,
+            "level": level.value,
+            "context": context,
+            "metadata": metadata or {},
         }
-        
-        # Kiểm tra filters
+
         if not self.should_send_notification(notification):
             return False
-        
-        # Thêm vào queue
-        with self.queue_lock:
-            self.notification_queue.append(notification)
-        
-        # Process ngay lập tức cho critical notifications
+
+        # CRITICAL xử lý trực tiếp ngay lập tức và KHÔNG đẩy vào queue để tránh gửi 2 lần.
         if level == NotificationLevel.CRITICAL:
             self.process_notification(notification)
         else:
-            # Start worker nếu chưa active
-            if not self.worker_active:
-                self.start_worker()
-        
+            with self._lock:
+                self.notification_queue.append(notification)
+                if not self.worker_active:
+                    self.start_worker()
+            self._wake_event.set()
+
         return True
 
-    def should_send_notification(self, notification):
-        """Kiểm tra có nên gửi notification không"""
-        # Level filter
+    def should_send_notification(self, notification: Dict[str, Any]) -> bool:
         min_level = self.config["filters"]["min_level"]
-        level_priority = {"info": 0, "warning": 1, "error": 2, "critical": 3}
-        
-        if level_priority[notification['level']] < level_priority[min_level]:
+        if self.LEVEL_PRIORITY.get(notification["level"], 0) < self.LEVEL_PRIORITY.get(min_level, 0):
             return False
-        
-        # Keywords filter
+
         keywords_filter = self.config["filters"]["keywords_filter"]
         if keywords_filter:
-            message_lower = notification['message'].lower()
-            if not any(keyword.lower() in message_lower for keyword in keywords_filter):
+            msg_lower = notification["message"].lower()
+            if not any(kw.lower() in msg_lower for kw in keywords_filter):
                 return False
-        
-        # Rate limiting
+
         return self.check_rate_limit()
 
-    def check_rate_limit(self):
-        """Kiểm tra rate limit"""
+    def check_rate_limit(self) -> bool:
         rate_limit = self.config["filters"]["rate_limit_per_minute"]
         if rate_limit <= 0:
             return True
-        
+
         current_time = time.time()
-        recent_notifications = [
-            n for n in self.notifications
-            if current_time - time.mktime(datetime.fromisoformat(n['timestamp']).timetuple()) < 60
-        ]
-        
-        return len(recent_notifications) < rate_limit
+        with self._lock:
+            recent = sum(
+                1 for item in self.notifications if (current_time - item.get("epoch_ts", 0)) < 60
+            )
+        return recent < rate_limit
 
-    def generate_notification_id(self):
-        """Tạo notification ID unique"""
-        return f"notif_{int(time.time() * 1000)}"
+    def generate_notification_id(self, epoch_ts: Optional[float] = None) -> str:
+        ts = epoch_ts if epoch_ts is not None else time.time()
+        return f"notif_{int(ts * 1000)}"
 
-    def start_worker(self):
-        """Bắt đầu background worker"""
-        if self.worker_active:
-            return
-        
-        self.worker_active = True
-        worker_thread = threading.Thread(target=self.worker_loop)
-        worker_thread.daemon = True
-        worker_thread.start()
+    def start_worker(self) -> None:
+        with self._lock:
+            if self.worker_active:
+                return
+            self._stop_event.clear()
+            self.worker_active = True
+            self.worker_thread = threading.Thread(target=self.worker_loop, daemon=True)
+            self.worker_thread.start()
 
-    def worker_loop(self):
-        """Worker loop xử lý notifications"""
-        while self.worker_active:
-            try:
-                with self.queue_lock:
-                    if self.notification_queue:
-                        notification = self.notification_queue.popleft()
-                    else:
-                        notification = None
-                
-                if notification:
-                    self.process_notification(notification)
+    def worker_loop(self) -> None:
+        while not self._stop_event.is_set():
+            notification = None
+            with self._lock:
+                if self.notification_queue:
+                    notification = self.notification_queue.popleft()
                 else:
-                    time.sleep(0.1)  # Short sleep when queue is empty
-                    
-            except Exception as e:
-                print(f"[NOTIFY] ❌ Worker error: {str(e)}")
-                time.sleep(1)
+                    self._wake_event.clear()
 
-    def process_notification(self, notification):
-        """Xử lý notification"""
+            if notification is not None:
+                self.process_notification(notification)
+            else:
+                self._wake_event.wait(timeout=0.5)
+
+        # Xử lý nốt phần còn lại trong queue trước khi dừng hẳn
+        while True:
+            with self._lock:
+                if not self.notification_queue:
+                    break
+                notification = self.notification_queue.popleft()
+            self.process_notification(notification)
+
+    def process_notification(self, notification: Dict[str, Any]) -> None:
         try:
-            # Lưu vào history
-            self.notifications.append(notification)
-            
-            # Gửi qua các channels
-            for channel_type, channel in self.channels.items():
+            with self._lock:
+                self.notifications.append(notification)
+                channels_snapshot = list(self.channels.items())
+
+            for channel_type, channel in channels_snapshot:
                 try:
                     channel.send(notification)
-                    self.notification_stats['by_channel'][channel_type.value] += 1
-                except Exception as e:
-                    print(f"[NOTIFY] ❌ Error sending to {channel_type.value}: {str(e)}")
-            
-            # Cập nhật stats
-            self.notification_stats['total_sent'] += 1
-            self.notification_stats['by_level'][notification['level']] += 1
-            
-            # Notify subscribers
+                    with self._lock:
+                        self.notification_stats["by_channel"][channel_type.value] += 1
+                except Exception as exc:
+                    print(f"[NOTIFY] ❌ Lỗi gửi qua {channel_type.value}: {exc}")
+
+            with self._lock:
+                self.notification_stats["total_sent"] += 1
+                self.notification_stats["by_level"][notification["level"]] += 1
+
             self.notify_subscribers(notification)
-            
-        except Exception as e:
-            print(f"[NOTIFY] ❌ Error processing notification: {str(e)}")
+        except Exception as exc:
+            print(f"[NOTIFY] ❌ Lỗi xử lý notification: {exc}")
 
-    def notify_subscribers(self, notification):
-        """Thông báo cho subscribers"""
-        level = notification['level']
-        for subscriber_level, callbacks in self.subscribers.items():
-            if self.should_notify_subscriber(level, subscriber_level):
-                for callback in callbacks:
-                    try:
-                        callback(notification)
-                    except Exception as e:
-                        print(f"[NOTIFY] ❌ Subscriber callback error: {str(e)}")
+    def notify_subscribers(self, notification: Dict[str, Any]) -> None:
+        level = notification["level"]
+        with self._lock:
+            callbacks_to_call: List[Callable[[Dict[str, Any]], None]] = []
+            for sub_level, callbacks in self.subscribers.items():
+                if self.should_notify_subscriber(level, sub_level):
+                    callbacks_to_call.extend(list(callbacks))
 
-    def should_notify_subscriber(self, notification_level, subscriber_level):
-        """Kiểm tra có nên notify subscriber không"""
-        level_priority = {"info": 0, "warning": 1, "error": 2, "critical": 3}
-        return level_priority[notification_level] >= level_priority[subscriber_level]
-
-    def subscribe(self, callback, level=NotificationLevel.INFO):
-        """Subscribe để nhận notifications"""
-        if level.value not in self.subscribers:
-            self.subscribers[level.value] = []
-        
-        self.subscribers[level.value].append(callback)
-
-    def unsubscribe(self, callback, level=NotificationLevel.INFO):
-        """Unsubscribe notifications"""
-        if level.value in self.subscribers:
+        for callback in callbacks_to_call:
             try:
-                self.subscribers[level.value].remove(callback)
-            except ValueError:
-                pass
+                callback(notification)
+            except Exception as exc:
+                print(f"[NOTIFY] ❌ Lỗi subscriber callback: {exc}")
 
-    def get_recent_notifications(self, hours=24, level=None):
-        """Lấy notifications gần đây"""
+    def should_notify_subscriber(self, notification_level: str, subscriber_level: str) -> bool:
+        return self.LEVEL_PRIORITY.get(notification_level, 0) >= self.LEVEL_PRIORITY.get(
+            subscriber_level, 0
+        )
+
+    def subscribe(self, callback: Callable[[Dict[str, Any]], None], level: NotificationLevel = NotificationLevel.INFO) -> None:
+        with self._lock:
+            self.subscribers.setdefault(level.value, []).append(callback)
+
+    def unsubscribe(self, callback: Callable[[Dict[str, Any]], None], level: NotificationLevel = NotificationLevel.INFO) -> None:
+        with self._lock:
+            if level.value in self.subscribers:
+                try:
+                    self.subscribers[level.value].remove(callback)
+                except ValueError:
+                    pass
+
+    def get_recent_notifications(
+        self, hours: int = 24, level: Optional[NotificationLevel] = None, limit: int = 50
+    ) -> List[Dict[str, Any]]:
         cutoff_time = datetime.now() - timedelta(hours=hours)
-        
+        with self._lock:
+            snapshot = list(self.notifications)
+
         recent = []
-        for notification in self.notifications:
-            notif_time = datetime.fromisoformat(notification['timestamp'])
+        for notif in snapshot:
+            try:
+                notif_time = datetime.fromisoformat(notif["timestamp"])
+            except ValueError:
+                continue
             if notif_time > cutoff_time:
-                if level is None or notification['level'] == level.value:
-                    recent.append(notification)
-        
-        return recent
+                if level is None or notif["level"] == level.value:
+                    recent.append({k: v for k, v in notif.items() if k != "epoch_ts"})
+        return recent[-limit:]
 
-    def get_notification_stats(self):
-        """Lấy thống kê notifications"""
-        return {
-            **self.notification_stats,
-            'queue_size': len(self.notification_queue),
-            'history_size': len(self.notifications),
-            'active_channels': len(self.channels),
-            'subscribers_count': sum(len(callbacks) for callbacks in self.subscribers.values())
-        }
+    def get_notification_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "total_sent": self.notification_stats["total_sent"],
+                "by_level": dict(self.notification_stats["by_level"]),
+                "by_channel": dict(self.notification_stats["by_channel"]),
+                "queue_size": len(self.notification_queue),
+                "history_size": len(self.notifications),
+                "active_channels": len(self.channels),
+                "subscribers_count": sum(len(v) for v in self.subscribers.values()),
+            }
 
-    def print_notification_summary(self):
-        """In tóm tắt notifications"""
+    def print_notification_summary(self) -> None:
         stats = self.get_notification_stats()
-        
-        print(f"\n[NOTIFY] 🔔 === NOTIFICATION SUMMARY ===")
-        print(f"[NOTIFY] 📊 Total Sent: {stats['total_sent']}")
-        print(f"[NOTIFY] 📋 Queue Size: {stats['queue_size']}")
-        print(f"[NOTIFY] 📚 History Size: {stats['history_size']}")
-        print(f"[NOTIFY] 📡 Active Channels: {stats['active_channels']}")
-        
-        print(f"[NOTIFY] 📈 By Level:")
-        for level, count in stats['by_level'].items():
+        print("\n[NOTIFY] 🔔 === NOTIFICATION SUMMARY ===")
+        print(f"[NOTIFY] 📊 Total Sent: {stats['total_sent']} | History: {stats['history_size']}")
+        for level, count in stats["by_level"].items():
             if count > 0:
                 print(f"[NOTIFY]   - {level.upper()}: {count}")
-        
-        print(f"[NOTIFY] 📤 By Channel:")
-        for channel, count in stats['by_channel'].items():
-            if count > 0:
-                print(f"[NOTIFY]   - {channel.upper()}: {count}")
-        
-        print(f"[NOTIFY] =====================================\n")
+        print("[NOTIFY] =====================================\n")
 
-    def stop(self):
-        """Dừng notification system"""
-        self.worker_active = False
-        print("[NOTIFY] 🛑 Notification system stopped")
+    def stop(self) -> None:
+        with self._lock:
+            self.worker_active = False
+            self._stop_event.set()
+            self._wake_event.set()
+            thread = self.worker_thread
+            self.worker_thread = None
+
+        if thread and thread.is_alive():
+            thread.join(timeout=2.0)
 
 
-# Notification channel implementations
 class ConsoleNotifier:
-    def __init__(self, config):
+    def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.colors = {
-            'info': '\033[94m',      # Blue
-            'warning': '\033[93m',   # Yellow
-            'error': '\033[91m',     # Red
-            'critical': '\033[95m',  # Magenta
-            'reset': '\033[0m'       # Reset
+            "info": "\033[94m",
+            "warning": "\033[93m",
+            "error": "\033[91m",
+            "critical": "\033[95m",
+            "reset": "\033[0m",
         }
 
-    def send(self, notification):
-        """Gửi notification ra console"""
-        level = notification['level']
-        message = notification['message']
-        context = notification['context']
-        
-        if self.config.get('show_timestamp', True):
-            timestamp = datetime.fromisoformat(notification['timestamp']).strftime('%H:%M:%S')
-            prefix = f"[{timestamp}]"
-        else:
-            prefix = ""
-        
-        if self.config.get('colored_output', True):
-            color = self.colors.get(level, '')
-            reset = self.colors['reset']
-            level_str = f"{color}[{level.upper()}]{reset}"
+    def send(self, notification: Dict[str, Any]) -> None:
+        level = notification["level"]
+        message = notification["message"]
+        context = notification["context"]
+
+        prefix = ""
+        if self.config.get("show_timestamp", True):
+            ts = datetime.fromisoformat(notification["timestamp"]).strftime("%H:%M:%S")
+            prefix = f"[{ts}] "
+
+        if self.config.get("colored_output", True):
+            level_str = f"{self.colors.get(level, '')}[{level.upper()}]{self.colors['reset']}"
         else:
             level_str = f"[{level.upper()}]"
-        
-        output = f"{prefix} {level_str} {message}"
+
+        output = f"{prefix}{level_str} {message}"
         if context:
             output += f" ({context})"
-        
         print(output)
 
 
 class FileNotifier:
-    def __init__(self, config):
+    def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.log_file = config['log_file']
-        
-        # Tạo thư mục nếu chưa có
-        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+        self.log_file = config["log_file"]
+        os.makedirs(os.path.dirname(self.log_file) or ".", exist_ok=True)
+        self._lock = threading.Lock()
 
-    def send(self, notification):
-        """Gửi notification vào file"""
-        try:
-            log_entry = {
-                'timestamp': notification['timestamp'],
-                'level': notification['level'],
-                'message': notification['message'],
-                'context': notification['context'],
-                'metadata': notification.get('metadata', {})
-            }
-            
-            with open(self.log_file, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
-            
-            # Kiểm tra kích thước file
-            self.rotate_log_if_needed()
-            
-        except Exception as e:
-            print(f"[NOTIFY] ❌ File notification error: {str(e)}")
+    def send(self, notification: Dict[str, Any]) -> None:
+        log_entry = {
+            "timestamp": notification["timestamp"],
+            "level": notification["level"],
+            "message": notification["message"],
+            "context": notification["context"],
+            "metadata": notification.get("metadata", {}),
+        }
+        with self._lock:
+            try:
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+                self.rotate_log_if_needed()
+            except Exception as exc:
+                print(f"[NOTIFY] ❌ File notification error: {exc}")
 
-    def rotate_log_if_needed(self):
-        """Rotate log file nếu quá lớn"""
-        try:
-            max_size = self.config.get('max_file_size_mb', 10) * 1024 * 1024
-            
-            if os.path.exists(self.log_file) and os.path.getsize(self.log_file) > max_size:
-                # Backup current log
-                backup_file = f"{self.log_file}.backup"
-                if os.path.exists(backup_file):
-                    os.remove(backup_file)
-                os.rename(self.log_file, backup_file)
-                
-                print(f"[NOTIFY] 🔄 Log file rotated: {self.log_file}")
-        except Exception as e:
-            print(f"[NOTIFY] ❌ Log rotation error: {str(e)}")
+    def rotate_log_if_needed(self) -> None:
+        max_size = self.config.get("max_file_size_mb", 10) * 1024 * 1024
+        if os.path.exists(self.log_file) and os.path.getsize(self.log_file) > max_size:
+            backup_file = f"{self.log_file}.backup"
+            if os.path.exists(backup_file):
+                os.remove(backup_file)
+            os.rename(self.log_file, backup_file)
 
 
 class EmailNotifier:
-    def __init__(self, config):
+    def __init__(self, config: Dict[str, Any]):
         self.config = config
 
-    def send(self, notification):
-        """Gửi notification qua email"""
-        try:
-            if not self.config.get('to_emails'):
-                return
-            
-            # Tạo email
-            msg = MIMEMultipart()
-            msg['From'] = self.config['from_email']
-            msg['To'] = ', '.join(self.config['to_emails'])
-            msg['Subject'] = f"[{notification['level'].upper()}] InstaChatBot Notification"
-            
-            # Email body
-            body = f"""
-Notification Details:
-- Level: {notification['level'].upper()}
-- Time: {notification['timestamp']}
-- Message: {notification['message']}
-- Context: {notification['context']}
-- Metadata: {json.dumps(notification.get('metadata', {}), indent=2)}
-"""
-            
-            msg.attach(MIMEText(body, 'plain'))
-            
-            # Gửi email
-            server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'])
+    def send(self, notification: Dict[str, Any]) -> None:
+        if not self.config.get("to_emails"):
+            return
+        msg = MIMEMultipart()
+        msg["From"] = self.config["from_email"]
+        msg["To"] = ", ".join(self.config["to_emails"])
+        msg["Subject"] = f"[{notification['level'].upper()}] InstaChat Notification"
+        body = (
+            f"Level: {notification['level'].upper()}\n"
+            f"Time: {notification['timestamp']}\n"
+            f"Context: {notification['context']}\n"
+            f"Message: {notification['message']}\n"
+            f"Metadata: {json.dumps(notification.get('metadata', {}), indent=2, ensure_ascii=False)}\n"
+        )
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        with smtplib.SMTP(self.config["smtp_server"], self.config["smtp_port"], timeout=10) as server:
             server.starttls()
-            server.login(self.config['username'], self.config['password'])
-            
-            text = msg.as_string()
-            server.sendmail(self.config['from_email'], self.config['to_emails'], text)
-            server.quit()
-            
-        except Exception as e:
-            print(f"[NOTIFY] ❌ Email notification error: {str(e)}")
+            server.login(self.config["username"], self.config["password"])
+            server.sendmail(self.config["from_email"], self.config["to_emails"], msg.as_string())
 
 
 class WebhookNotifier:
-    def __init__(self, config):
+    """Hỗ trợ Discord (`content`), Slack (`text`) và Generic JSON webhook."""
+
+    def __init__(self, config: Dict[str, Any]):
         self.config = config
 
-    def send(self, notification):
-        """Gửi notification qua webhook"""
-        try:
-            import requests
-            
-            payload = {
-                'notification': notification,
-                'timestamp': notification['timestamp'],
-                'source': 'InstaChatBot'
-            }
-            
-            headers = self.config.get('headers', {})
-            headers['Content-Type'] = 'application/json'
-            
-            response = requests.post(
-                self.config['url'],
-                json=payload,
-                headers=headers,
-                timeout=10
-            )
-            
-            response.raise_for_status()
-            
-        except Exception as e:
-            print(f"[NOTIFY] ❌ Webhook notification error: {str(e)}")
+    def send(self, notification: Dict[str, Any]) -> None:
+        import requests
+
+        summary = f"[{notification['level'].upper()}] ({notification.get('context') or 'bot'}) {notification['message']}"
+        payload = {
+            "content": summary,
+            "text": summary,
+            "notification": {k: v for k, v in notification.items() if k != "epoch_ts"},
+            "timestamp": notification["timestamp"],
+            "source": "InstaChat",
+        }
+        headers = {**self.config.get("headers", {}), "Content-Type": "application/json"}
+        response = requests.post(self.config["url"], json=payload, headers=headers, timeout=10)
+        response.raise_for_status()
 
 
-# Singleton instance
-_notification_system = None
+_notification_system: Optional[NotificationSystem] = None
+_notif_lock = threading.Lock()
 
-def get_notification_system():
-    """Lấy instance singleton của NotificationSystem"""
+
+def get_notification_system(config_file: Optional[str] = None) -> NotificationSystem:
     global _notification_system
-    if _notification_system is None:
-        _notification_system = NotificationSystem()
-    return _notification_system
+    with _notif_lock:
+        if _notification_system is None:
+            _notification_system = NotificationSystem(config_file=config_file)
+        return _notification_system
 
 
-# Convenience functions
-def notify_info(message, context="", metadata=None):
-    """Gửi info notification"""
-    get_notification_system().send_notification(message, NotificationLevel.INFO, context, metadata)
-
-def notify_warning(message, context="", metadata=None):
-    """Gửi warning notification"""
-    get_notification_system().send_notification(message, NotificationLevel.WARNING, context, metadata)
-
-def notify_error(message, context="", metadata=None):
-    """Gửi error notification"""
-    get_notification_system().send_notification(message, NotificationLevel.ERROR, context, metadata)
-
-def notify_critical(message, context="", metadata=None):
-    """Gửi critical notification"""
-    get_notification_system().send_notification(message, NotificationLevel.CRITICAL, context, metadata)
+def reset_notification_system() -> None:
+    global _notification_system
+    with _notif_lock:
+        if _notification_system is not None:
+            _notification_system.stop()
+        _notification_system = None
 
 
-if __name__ == "__main__":
-    # Test notification system
-    notif_system = get_notification_system()
-    
-    # Test different levels
-    notify_info("Bot started successfully", "startup")
-    notify_warning("High memory usage detected", "performance")
-    notify_error("Failed to connect to Instagram", "connection")
-    notify_critical("System crash detected", "system")
-    
-    # Test subscriber
-    def custom_handler(notification):
-        print(f"Custom handler: {notification['message']}")
-    
-    notif_system.subscribe(custom_handler, NotificationLevel.WARNING)
-    
-    # Send more notifications
-    notify_warning("Another warning", "test")
-    
-    # Print summary
-    time.sleep(1)  # Wait for processing
-    notif_system.print_notification_summary()
-    
-    # Stop system
-    notif_system.stop() 
+def notify_info(message: str, context: str = "", metadata: Optional[Dict[str, Any]] = None) -> bool:
+    return get_notification_system().send_notification(message, NotificationLevel.INFO, context, metadata)
+
+
+def notify_warning(message: str, context: str = "", metadata: Optional[Dict[str, Any]] = None) -> bool:
+    return get_notification_system().send_notification(message, NotificationLevel.WARNING, context, metadata)
+
+
+def notify_error(message: str, context: str = "", metadata: Optional[Dict[str, Any]] = None) -> bool:
+    return get_notification_system().send_notification(message, NotificationLevel.ERROR, context, metadata)
+
+
+def notify_critical(message: str, context: str = "", metadata: Optional[Dict[str, Any]] = None) -> bool:
+    return get_notification_system().send_notification(message, NotificationLevel.CRITICAL, context, metadata)

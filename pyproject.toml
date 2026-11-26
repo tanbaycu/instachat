@@ -1,0 +1,36 @@
+[project]
+name = "instachat"
+version = "2.0.0"
+description = "Bot chat Instagram tự động tích hợp Google Gemini (google-genai), anti-detection, proxy pool, SQLite memory và dashboard theo dõi real-time."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "selenium>=4.25.0",
+    "google-genai>=1.0.0",
+    "psutil>=6.0.0",
+    "cryptography>=43.0.0",
+    "pyyaml>=6.0.2",
+    "requests>=2.32.0",
+    "python-dotenv>=1.0.1",
+    "pillow>=10.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [".venv", "data", "memories", "temp_memories_backup", "chromium_temp_data_dir"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]

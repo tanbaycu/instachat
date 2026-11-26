@@ -1,0 +1,24 @@
+services:
+  instachat:
+    build: .
+    container_name: instachat-bot
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/app/data
+      - CHROME_HEADLESS=true
+      - DASHBOARD_ENABLED=true
+      - DASHBOARD_HOST=0.0.0.0
+      - DASHBOARD_PORT=8765
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

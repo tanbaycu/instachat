@@ -28,21 +28,22 @@ wheels/
 *.egg
 MANIFEST
 
-# Virtual environments
+# Virtual environments & caches
+.venv/
 venv/
 env/
 ENV/
 env.bak/
 venv.bak/
+.pytest_cache/
+.ruff_cache/
 
-# IDE
+# IDE & OS
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 .DS_Store?
 ._*
@@ -51,37 +52,41 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
-# Chrome/Selenium
+# Runtime data directory (sessions, memories, cache, logs, analytics, profiles, images)
+data/
+
+# Legacy/local runtime artifacts (keep tracked source clean)
+config/*_config.json
+config/config_export_*.json
+security/session.key
+security/sessions.json
+security/security_config.json
+security/security_report.json
+monitoring/*.json
+monitoring/*.log
+analytics/*.json
+utils/cache/
+utils/notifications.log
+utils/notifications_config.json
+memories/
+temp_memories_backup/
+memories_backup/
 chromium_temp_data_dir/
 chrome_temp_*/
 selenium_temp_*/
-
-# Logs
 *.log
 logs/
 log/
-
-# Temporary files
 temp/
 tmp/
 *.tmp
 *.temp
-
-# Memory backups (có thể chứa thông tin nhạy cảm)
-temp_memories_backup/
-memories_backup/
-
-# API keys và credentials (backup)
 *_api_key*
 *_credentials*
 *_secret*
 *_token*
-
-# Database
 *.db
 *.sqlite
 *.sqlite3
-
-# Images generated
 generated_images/
-temp_images/ 
+temp_images/

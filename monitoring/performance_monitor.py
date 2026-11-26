@@ -1,277 +1,260 @@
-import time
-import psutil
-import threading
-from datetime import datetime, timedelta
+from collections import deque
+from datetime import datetime
+from functools import wraps
 import json
 import os
-from collections import deque
+import threading
+import time
+from typing import Any, Dict, List, Optional
+
+import psutil
+
+from config.config_manager import get_data_dir
 
 
 class PerformanceMonitor:
-    def __init__(self, log_file="monitoring/performance_logs.json"):
-        self.log_file = log_file
+    """Theo dõi CPU, RAM, response time và health score của bot theo thời gian thực."""
+
+    def __init__(self, log_file: Optional[str] = None):
+        logs_dir = get_data_dir("logs")
+        self.log_file = log_file or os.path.join(logs_dir, "performance_logs.json")
         self.start_time = datetime.now()
-        self.metrics = {
-            'cpu_usage': deque(maxlen=100),
-            'memory_usage': deque(maxlen=100),
-            'response_times': deque(maxlen=100),
-            'message_count': 0,
-            'error_count': 0,
-            'avg_response_time': 0,
-            'peak_memory': 0,
-            'peak_cpu': 0
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+
+        self.metrics: Dict[str, Any] = {
+            "cpu_usage": deque(maxlen=100),
+            "memory_usage": deque(maxlen=100),
+            "response_times": deque(maxlen=100),
+            "message_count": 0,
+            "error_count": 0,
+            "avg_response_time": 0.0,
+            "peak_memory": 0.0,
+            "peak_cpu": 0.0,
         }
-        
+
         self.monitoring_active = False
-        self.monitor_thread = None
-        
-        # Tạo thư mục nếu chưa có
-        os.makedirs(os.path.dirname(log_file), exist_ok=True)
-        
-        print("[MONITOR] 📊 Performance Monitor đã khởi tạo")
+        self.monitor_thread: Optional[threading.Thread] = None
 
-    def start_monitoring(self, interval=5):
-        """Bắt đầu theo dõi hiệu suất"""
-        if self.monitoring_active:
-            return
-            
-        self.monitoring_active = True
-        self.monitor_thread = threading.Thread(target=self._monitor_loop, args=(interval,))
-        self.monitor_thread.daemon = True
-        self.monitor_thread.start()
-        print(f"[MONITOR] 🚀 Bắt đầu theo dõi mỗi {interval}s")
+        os.makedirs(os.path.dirname(self.log_file) or logs_dir, exist_ok=True)
 
-    def stop_monitoring(self):
-        """Dừng theo dõi hiệu suất"""
-        self.monitoring_active = False
-        if self.monitor_thread:
-            self.monitor_thread.join()
-        print("[MONITOR] 🛑 Đã dừng theo dõi")
+    def start_monitoring(self, interval: float = 10.0) -> None:
+        """Khởi chạy thread nền thu thập CPU/RAM; có thể dừng tức thì qua stop_event."""
+        with self._lock:
+            if self.monitoring_active:
+                return
+            self._stop_event.clear()
+            self.monitoring_active = True
+            self.monitor_thread = threading.Thread(
+                target=self._monitor_loop, args=(interval,), daemon=True
+            )
+            self.monitor_thread.start()
 
-    def _monitor_loop(self, interval):
-        """Vòng lặp theo dõi chính"""
-        while self.monitoring_active:
+    def stop_monitoring(self) -> None:
+        """Dừng thread giám sát ngay lập tức không bị block bởi sleep dài."""
+        with self._lock:
+            self.monitoring_active = False
+            self._stop_event.set()
+            thread = self.monitor_thread
+            self.monitor_thread = None
+
+        if thread and thread.is_alive():
+            thread.join(timeout=2.0)
+
+    def _monitor_loop(self, interval: float) -> None:
+        # Gọi lần đầu để khởi tạo baseline CPU của psutil
+        try:
+            psutil.cpu_percent(interval=None)
+        except Exception:
+            pass
+
+        while not self._stop_event.is_set():
             try:
-                # CPU usage
-                cpu_percent = psutil.cpu_percent(interval=1)
-                self.metrics['cpu_usage'].append(cpu_percent)
-                
-                # Memory usage
-                memory = psutil.virtual_memory()
-                memory_percent = memory.percent
-                self.metrics['memory_usage'].append(memory_percent)
-                
-                # Cập nhật peak values
-                self.metrics['peak_cpu'] = max(self.metrics['peak_cpu'], cpu_percent)
-                self.metrics['peak_memory'] = max(self.metrics['peak_memory'], memory_percent)
-                
-                # Log nếu usage cao
-                if cpu_percent > 80:
-                    print(f"[MONITOR] ⚠️ CPU cao: {cpu_percent}%")
-                if memory_percent > 80:
-                    print(f"[MONITOR] ⚠️ Memory cao: {memory_percent}%")
-                
-                time.sleep(interval)
-                
-            except Exception as e:
-                print(f"[MONITOR] ❌ Lỗi monitoring: {str(e)}")
-                time.sleep(interval)
+                cpu_percent = float(psutil.cpu_percent(interval=0.1))
+                memory_percent = float(psutil.virtual_memory().percent)
 
-    def record_response_time(self, response_time):
-        """Ghi lại thời gian phản hồi"""
-        self.metrics['response_times'].append(response_time)
-        self.metrics['message_count'] += 1
-        
-        # Tính average response time
-        if self.metrics['response_times']:
-            self.metrics['avg_response_time'] = sum(self.metrics['response_times']) / len(self.metrics['response_times'])
-        
-        # Cảnh báo nếu response time quá cao
-        if response_time > 10:
-            print(f"[MONITOR] ⚠️ Response time cao: {response_time:.2f}s")
+                with self._lock:
+                    self.metrics["cpu_usage"].append(cpu_percent)
+                    self.metrics["memory_usage"].append(memory_percent)
+                    self.metrics["peak_cpu"] = max(self.metrics["peak_cpu"], cpu_percent)
+                    self.metrics["peak_memory"] = max(self.metrics["peak_memory"], memory_percent)
+            except Exception as exc:
+                print(f"[MONITOR] ❌ Lỗi monitoring: {exc}")
 
-    def record_error(self):
-        """Ghi lại lỗi"""
-        self.metrics['error_count'] += 1
-        print(f"[MONITOR] ❌ Tổng lỗi: {self.metrics['error_count']}")
+            if self._stop_event.wait(timeout=max(0.2, float(interval))):
+                break
 
-    def get_current_stats(self):
-        """Lấy thống kê hiện tại"""
-        uptime = datetime.now() - self.start_time
-        
-        return {
-            'uptime_seconds': uptime.total_seconds(),
-            'uptime_formatted': str(uptime).split('.')[0],
-            'current_cpu': self.metrics['cpu_usage'][-1] if self.metrics['cpu_usage'] else 0,
-            'current_memory': self.metrics['memory_usage'][-1] if self.metrics['memory_usage'] else 0,
-            'avg_cpu': sum(self.metrics['cpu_usage']) / len(self.metrics['cpu_usage']) if self.metrics['cpu_usage'] else 0,
-            'avg_memory': sum(self.metrics['memory_usage']) / len(self.metrics['memory_usage']) if self.metrics['memory_usage'] else 0,
-            'peak_cpu': self.metrics['peak_cpu'],
-            'peak_memory': self.metrics['peak_memory'],
-            'total_messages': self.metrics['message_count'],
-            'total_errors': self.metrics['error_count'],
-            'avg_response_time': self.metrics['avg_response_time'],
-            'error_rate': (self.metrics['error_count'] / max(1, self.metrics['message_count'])) * 100
-        }
+    def record_response_time(self, response_time: float) -> None:
+        with self._lock:
+            self.metrics["response_times"].append(float(response_time))
+            self.metrics["message_count"] += 1
+            times = self.metrics["response_times"]
+            self.metrics["avg_response_time"] = sum(times) / len(times) if times else 0.0
 
-    def get_health_status(self):
-        """Đánh giá tình trạng sức khỏe hệ thống"""
+    def record_error(self) -> None:
+        with self._lock:
+            self.metrics["error_count"] += 1
+
+    def get_current_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            uptime = datetime.now() - self.start_time
+            cpu_list = list(self.metrics["cpu_usage"])
+            mem_list = list(self.metrics["memory_usage"])
+            msg_count = self.metrics["message_count"]
+            err_count = self.metrics["error_count"]
+
+            return {
+                "uptime_seconds": uptime.total_seconds(),
+                "uptime_formatted": str(uptime).split(".")[0],
+                "current_cpu": cpu_list[-1] if cpu_list else 0.0,
+                "current_memory": mem_list[-1] if mem_list else 0.0,
+                "avg_cpu": sum(cpu_list) / len(cpu_list) if cpu_list else 0.0,
+                "avg_memory": sum(mem_list) / len(mem_list) if mem_list else 0.0,
+                "peak_cpu": self.metrics["peak_cpu"],
+                "peak_memory": self.metrics["peak_memory"],
+                "total_messages": msg_count,
+                "total_errors": err_count,
+                "avg_response_time": self.metrics["avg_response_time"],
+                "error_rate": (err_count / max(1, msg_count)) * 100.0,
+            }
+
+    def get_health_status(self) -> Dict[str, Any]:
         stats = self.get_current_stats()
-        
         health_score = 100
-        issues = []
-        
-        # Kiểm tra CPU
-        if stats['avg_cpu'] > 80:
+        issues: List[str] = []
+
+        if stats["avg_cpu"] > 80:
             health_score -= 30
             issues.append("CPU usage cao")
-        elif stats['avg_cpu'] > 60:
+        elif stats["avg_cpu"] > 60:
             health_score -= 15
             issues.append("CPU usage trung bình")
-        
-        # Kiểm tra Memory
-        if stats['avg_memory'] > 80:
+
+        if stats["avg_memory"] > 85:
             health_score -= 30
             issues.append("Memory usage cao")
-        elif stats['avg_memory'] > 60:
+        elif stats["avg_memory"] > 65:
             health_score -= 15
             issues.append("Memory usage trung bình")
-        
-        # Kiểm tra Response time
-        if stats['avg_response_time'] > 10:
+
+        if stats["avg_response_time"] > 10:
             health_score -= 25
             issues.append("Response time chậm")
-        elif stats['avg_response_time'] > 5:
+        elif stats["avg_response_time"] > 5:
             health_score -= 10
             issues.append("Response time trung bình")
-        
-        # Kiểm tra Error rate
-        if stats['error_rate'] > 10:
+
+        if stats["error_rate"] > 10:
             health_score -= 20
             issues.append("Error rate cao")
-        elif stats['error_rate'] > 5:
+        elif stats["error_rate"] > 5:
             health_score -= 10
             issues.append("Error rate trung bình")
-        
-        # Xác định status
-        if health_score >= 90:
+
+        score = max(0, health_score)
+        if score >= 90:
             status = "EXCELLENT"
-        elif health_score >= 75:
+        elif score >= 75:
             status = "GOOD"
-        elif health_score >= 60:
+        elif score >= 60:
             status = "FAIR"
-        elif health_score >= 40:
+        elif score >= 40:
             status = "POOR"
         else:
             status = "CRITICAL"
-        
+
         return {
-            'status': status,
-            'score': max(0, health_score),
-            'issues': issues,
-            'recommendations': self._get_recommendations(issues)
+            "status": status,
+            "score": score,
+            "issues": issues,
+            "recommendations": self._get_recommendations(issues),
         }
 
-    def _get_recommendations(self, issues):
-        """Đề xuất cải thiện dựa trên issues"""
-        recommendations = []
-        
+    def get_health_score(self) -> float:
+        """Trả về điểm sức khỏe chuẩn hóa trong đoạn [0.0, 1.0]."""
+        return self.get_health_status()["score"] / 100.0
+
+    def _get_recommendations(self, issues: List[str]) -> List[str]:
+        recommendations: List[str] = []
         if "CPU usage cao" in issues:
-            recommendations.append("Giảm tần suất polling, tối ưu thuật toán")
+            recommendations.append("Giảm tần suất polling hoặc bật chế độ idle")
         if "Memory usage cao" in issues:
-            recommendations.append("Dọn dẹp cache, giảm buffer size")
+            recommendations.append("Dọn dẹp cache và khởi động lại trình duyệt định kỳ")
         if "Response time chậm" in issues:
-            recommendations.append("Tối ưu AI prompt, cache responses")
+            recommendations.append("Kiểm tra độ trễ mạng/proxy hoặc đổi model Flash nhẹ hơn")
         if "Error rate cao" in issues:
-            recommendations.append("Kiểm tra network, cải thiện error handling")
-        
+            recommendations.append("Kiểm tra log lỗi và trạng thái tài khoản Instagram")
         return recommendations
 
-    def save_report(self):
-        """Lưu báo cáo hiệu suất"""
+    def save_report(self) -> bool:
         try:
             report = {
-                'timestamp': datetime.now().isoformat(),
-                'stats': self.get_current_stats(),
-                'health': self.get_health_status()
+                "timestamp": datetime.now().isoformat(),
+                "stats": self.get_current_stats(),
+                "health": self.get_health_status(),
             }
-            
-            with open(self.log_file, 'w', encoding='utf-8') as f:
+            with open(self.log_file, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2, ensure_ascii=False)
-            
-            print(f"[MONITOR] 💾 Đã lưu báo cáo: {self.log_file}")
             return True
-            
-        except Exception as e:
-            print(f"[MONITOR] ❌ Lỗi lưu báo cáo: {str(e)}")
+        except Exception as exc:
+            print(f"[MONITOR] ❌ Lỗi lưu báo cáo: {exc}")
             return False
 
-    def print_summary(self):
-        """In tóm tắt hiệu suất"""
+    def print_summary(self) -> None:
         stats = self.get_current_stats()
         health = self.get_health_status()
-        
-        print(f"\n[MONITOR] 📊 === PERFORMANCE SUMMARY ===")
+        print("\n[MONITOR] 📊 === PERFORMANCE SUMMARY ===")
         print(f"[MONITOR] ⏱️ Uptime: {stats['uptime_formatted']}")
-        print(f"[MONITOR] 💻 CPU: {stats['current_cpu']:.1f}% (avg: {stats['avg_cpu']:.1f}%, peak: {stats['peak_cpu']:.1f}%)")
-        print(f"[MONITOR] 🧠 Memory: {stats['current_memory']:.1f}% (avg: {stats['avg_memory']:.1f}%, peak: {stats['peak_memory']:.1f}%)")
-        print(f"[MONITOR] 💬 Messages: {stats['total_messages']} (avg response: {stats['avg_response_time']:.2f}s)")
+        print(
+            f"[MONITOR] 💻 CPU: {stats['current_cpu']:.1f}% "
+            f"(avg: {stats['avg_cpu']:.1f}%, peak: {stats['peak_cpu']:.1f}%)"
+        )
+        print(
+            f"[MONITOR] 🧠 Memory: {stats['current_memory']:.1f}% "
+            f"(avg: {stats['avg_memory']:.1f}%, peak: {stats['peak_memory']:.1f}%)"
+        )
+        print(
+            f"[MONITOR] 💬 Messages: {stats['total_messages']} "
+            f"(avg response: {stats['avg_response_time']:.2f}s)"
+        )
         print(f"[MONITOR] ❌ Errors: {stats['total_errors']} (rate: {stats['error_rate']:.1f}%)")
         print(f"[MONITOR] 🏥 Health: {health['status']} ({health['score']}/100)")
-        
-        if health['issues']:
-            print(f"[MONITOR] ⚠️ Issues: {', '.join(health['issues'])}")
-        
-        if health['recommendations']:
-            print(f"[MONITOR] 💡 Recommendations:")
-            for rec in health['recommendations']:
-                print(f"[MONITOR]   - {rec}")
-        
-        print(f"[MONITOR] =====================================\n")
+        print("[MONITOR] =====================================\n")
 
 
-# Singleton instance
-_performance_monitor = None
+_performance_monitor: Optional[PerformanceMonitor] = None
+_monitor_lock = threading.Lock()
 
-def get_performance_monitor():
-    """Lấy instance singleton của PerformanceMonitor"""
+
+def get_performance_monitor(log_file: Optional[str] = None) -> PerformanceMonitor:
     global _performance_monitor
-    if _performance_monitor is None:
-        _performance_monitor = PerformanceMonitor()
-    return _performance_monitor
+    with _monitor_lock:
+        if _performance_monitor is None:
+            _performance_monitor = PerformanceMonitor(log_file=log_file)
+        return _performance_monitor
 
 
-# Decorator để đo response time
+def reset_performance_monitor() -> None:
+    global _performance_monitor
+    with _monitor_lock:
+        if _performance_monitor is not None:
+            _performance_monitor.stop_monitoring()
+        _performance_monitor = None
+
+
 def measure_response_time(func):
-    """Decorator để đo thời gian phản hồi"""
+    """Decorator tự động đo thời gian xử lý của hàm và ghi nhận lỗi nếu có."""
+
+    @wraps(func)
     def wrapper(*args, **kwargs):
         start_time = time.time()
+        monitor = get_performance_monitor()
         try:
             result = func(*args, **kwargs)
-            response_time = time.time() - start_time
-            get_performance_monitor().record_response_time(response_time)
+            monitor.record_response_time(time.time() - start_time)
             return result
-        except Exception as e:
-            get_performance_monitor().record_error()
-            raise e
+        except Exception:
+            monitor.record_error()
+            raise
+
     return wrapper
-
-
-if __name__ == "__main__":
-    # Test performance monitor
-    monitor = get_performance_monitor()
-    monitor.start_monitoring(interval=2)
-    
-    try:
-        # Simulate some work
-        for i in range(5):
-            time.sleep(1)
-            monitor.record_response_time(0.5 + i * 0.1)
-            if i == 3:
-                monitor.record_error()
-        
-        monitor.print_summary()
-        monitor.save_report()
-        
-    finally:
-        monitor.stop_monitoring() 
